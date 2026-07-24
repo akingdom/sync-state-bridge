@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SyncStateBridge Demo: Find the Clusters</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        h1 { margin-bottom: 5px; color: #38bdf8; }
+        .turn-indicator { font-size: 1.2rem; font-weight: bold; margin-bottom: 20px; color: #a78bfa; min-height: 28px; }
+        .game-container { display: flex; gap: 40px; }
+        .board { background: #1e293b; padding: 15px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); text-align: center; }
+        .grid { display: grid; grid-template-columns: repeat(5, 45px); grid-template-rows: repeat(5, 45px); gap: 5px; margin-top: 10px; }
+        .cell { background: #334155; border: none; border-radius: 6px; cursor: pointer; transition: all 0.2s; font-size: 1.2rem; }
+        .cell:hover { background: #475569; }
+        .cell.hit { background: #ef4444; cursor: not-allowed; }
+        .cell.miss { background: #64748b; cursor: not-allowed; }
+        .disabled { pointer-events: none; opacity: 0.6; }
+    </style>
+</head>
+<body>
+    <h1>⚓ SyncStateBridge</h1>
+    <p>Simulating cross-environment reactive syncing on a unified state mesh</p>
+    <div class="turn-indicator" id="status">Initializing game mesh...</div>
+
+    <div class="game-container">
+        <div class="board" id="p1-board">
+            <h3>Player 1 (User Side)</h3>
+            <div class="grid" id="p1-grid"></div>
+        </div>
+        <div class="board disabled" id="p2-board">
+            <h3>Player 2 (Remote/AI Side)</h3>
+            <div class="grid" id="p2-grid"></div>
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "state-sync-bridge": "/client/stateClient.js"
+            }
+        }
+    </script>
+    <script type="module">
+        import { StateClient } from 'state-sync-bridge';
+
+        const client = new StateClient('/stream');
+        let turnTimer = null;
+
+        function renderUI(store) {
+            const state = store.game?.['game'] || {};
+            const statusEl = document.getElementById('status');
+            const p1Grid = document.getElementById('p1-grid');
+            const p2Grid = document.getElementById('p2-grid');
+
+            if (state.turn === "P1") {
+                statusEl.innerText = "👉 Your Turn! Click a tile (or wait 2s for auto-fire)";
+                document.getElementById('p1-board').classList.remove('disabled');
+                document.getElementById('p2-board').classList.add('disabled');
+            } else {
+                statusEl.innerText = "🤖 Remote AI Processing Turn...";
+                document.getElementById('p1-board').classList.add('disabled');
+                document.getElementById('p2-board').classList.remove('disabled');
+            }
+
+            p1Grid.innerHTML = '';
+            (state.p2Guessed || []).forEach((guess, index) => {
+                const btn = document.createElement('button');
+                btn.className = `cell ${guess || ''}`;
+                if (guess === 'hit') btn.innerText = '💥';
+                if (guess === 'miss') btn.innerText = '🌊';
+                if (!guess && state.turn === "P1") {
+                    btn.onclick = () => handleTurn(index);
+                }
+                p1Grid.appendChild(btn);
+            });
+
+            p2Grid.innerHTML = '';
+            (state.p1Guessed || []).forEach((guess) => {
+                const btn = document.createElement('button');
+                btn.className = `cell ${guess || ''}`;
+                if (guess === 'hit') btn.innerText = '💥';
+                if (guess === 'miss') btn.innerText = '🌊';
+                p2Grid.appendChild(btn);
+            });
+        }
+
+        async function handleTurn(index) {
+            clearTimeout(turnTimer);
+            await fetch('/move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ index })
+            });
+            startTurnTimer();
+        }
+
+        function startTurnTimer() {
+            turnTimer = setTimeout(() => {
+                // If it's P1 turn and no move made, auto-fire a random unguessed cell
+                const state = client.getEntities('game')[0] || {};
+                if (state.turn === "P1") {
+                    const unguessed = state.p2Guessed.map((g, i) => g === null ? i : null).filter(v => v !== null);
+                    if (unguessed.length) {
+                        handleTurn(unguessed[Math.floor(Math.random() * unguessed.length)]);
+                    }
+                } else {
+                    // Trigger AI turn
+                    handleTurn(-1); // index -1 tells server it's AI turn
+                }
+            }, 2000);
+        }
+
+        client.setCallbacks({
+            onDelta: (delta) => {
+                renderUI(client.getState());
+            },
+            onManifest: () => {
+                renderUI(client.getState());
+                startTurnTimer();
+            }
+        });
+
+        client.connect();
+    </script>
+</body>
+</html>

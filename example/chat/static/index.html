@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>StateSync Chat</title>
+    <style>
+        body { font-family: system-ui; background: #0f172a; color: #f8fafc; display: flex; flex-direction: column; align-items: center; padding: 2rem; }
+        #chat { width: 400px; background: #1e293b; padding: 1rem; border-radius: 12px; }
+        #messages { height: 300px; overflow-y: auto; margin-bottom: 10px; }
+        .msg { background: #334155; padding: 8px; margin: 4px 0; border-radius: 6px; }
+        #input-area { display: flex; gap: 8px; }
+        #input { flex: 1; padding: 8px; border-radius: 6px; border: none; }
+        #send { padding: 8px 16px; background: #38bdf8; border: none; border-radius: 6px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>💬 StateSync Chat</h1>
+    <div id="chat">
+        <div id="messages"></div>
+        <div id="input-area">
+            <input id="input" placeholder="Type a message..." />
+            <button id="send">Send</button>
+        </div>
+    </div>
+    <script type="importmap">
+    {
+        "imports": {
+            "state-sync-bridge": "/client/stateClient.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import { StateClient } from 'state-sync-bridge';
+
+        const client = new StateClient('/stream');
+        const messagesEl = document.getElementById('messages');
+        const input = document.getElementById('input');
+        const sendBtn = document.getElementById('send');
+
+        client.setCallbacks({
+            onDelta: (delta) => {
+                // Delta contains added messages; refresh from store
+                renderMessages();
+            },
+            onManifest: (manifest) => {
+                renderMessages();
+            }
+        });
+
+        function renderMessages() {
+            const msgs = client.getEntities('message');
+            messagesEl.innerHTML = msgs.map(m => `<div class="msg">${m.text}</div>`).join('');
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        async function sendMessage() {
+            const text = input.value.trim();
+            if (!text) return;
+            await fetch('/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text })
+            });
+            input.value = '';
+        }
+
+        sendBtn.addEventListener('click', sendMessage);
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMessage(); });
+
+        client.connect();
+    </script>
+</body>
+</html>

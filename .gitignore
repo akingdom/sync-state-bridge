@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+*.log
+.DS_Store
+
+# Node / JavaScript
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+package-lock.json
+yarn.lock
+# (optional - include if you want to ignore lock files)
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.orig
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Project specific
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Logs and data (if any)
+logs/
+*.log
+.data/
+private.json
