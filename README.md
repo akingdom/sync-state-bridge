@@ -1,3 +1,5 @@
+![State Sync Diagram](statesyncbridgediagram.svg)
+
 # sync-state-bridge
 
 A deterministic, race‑safe state synchronisation bridge for real‑time applications, with built‑in QoS, backpressure handling, and network resilience.
