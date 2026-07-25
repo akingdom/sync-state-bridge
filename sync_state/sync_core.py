@@ -2,9 +2,30 @@ import json
 import hashlib
 import asyncio
 import copy
+import time
 from collections import defaultdict, deque
-from typing import Dict, List, Any, Callable, Optional, Set, Tuple
+from typing import Dict, List, Any, Callable, Optional, Set, AsyncIterator
+from .qos import QoS, DropPolicy, TypeMetadata   # if you have these
 
+
+def canonical_hash(entity: Dict[str, Any]) -> str:
+    """Deterministic, canonical SHA-256 hash calculation for dictionaries."""
+    if "_v" in entity:
+        return str(entity["_v"])
+
+    def _default_encoder(o: Any) -> Any:
+        if isinstance(o, (set, tuple)):
+            return list(o)
+        if hasattr(o, "to_dict") and callable(o.to_dict):
+            return o.to_dict()
+        return sorted(list(o.__dict__.items())) if hasattr(o, "__dict__") else str(o)
+
+    try:
+        import orjson
+        encoded = orjson.dumps(entity, option=orjson.OPT_SORT_KEYS, default=_default_encoder)
+    except ImportError:
+        encoded = json.dumps(entity, sort_keys=True, default=_default_encoder).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
 
 class StateSyncError(Exception):
     """Base exception for StateSync operations."""
@@ -22,19 +43,32 @@ class StateSync:
         self.max_history = max_history
         self.schema_version = schema_version
 
-        self._lock = asyncio.Lock()  # safe to create outside loop
+        self._lock = asyncio.Lock()
         self._dirty_types: Set[str] = set()
         self._snapshot_providers: Dict[str, Callable[[], List[Dict]]] = {}
 
         self._versions: Dict[str, int] = defaultdict(int)
         self._change_logs: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_history))
         self._current_snapshots: Dict[str, Dict[Any, Dict]] = {}
+        self._type_metadata: Dict[str, TypeMetadata] = {}   # <-- add this
 
-        # For notifying active streams
         self._stream_events: List[asyncio.Event] = []
 
-    def register_snapshot_provider(self, type_name: str, provider: Callable[[], List[Dict]]):
+    def register_snapshot_provider(
+        self,
+        type_name: str,
+        provider: Callable[[], List[Dict]],
+        qos: Optional[QoS] = None,
+        max_frame_bytes: int = 1_048_576
+    ):
+        from .qos import QoS, TypeMetadata  # ensure import is available
+        qos_obj = qos or QoS()
         self._snapshot_providers[type_name] = provider
+        self._type_metadata[type_name] = TypeMetadata(
+            type_name=type_name,
+            qos=qos_obj,
+            max_frame_bytes=max_frame_bytes
+        )
 
     def mark_dirty(self, type_name: str):
         self._dirty_types.add(type_name)

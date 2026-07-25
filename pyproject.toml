@@ -9,4 +9,39 @@ description = "Versioned delta-state synchronization engine for real-time applic
 authors = [{name = "Andrew Kingdom", email = "1809762+akingdom@users.noreply.github.com"}]
 readme = "README.md"
 requires-python = ">=3.7"
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 dependencies = []
+
+[project.optional-dependencies]
+fast = ["orjson>=3.8.0"]
+serial = ["pyserial>=3.5", "cobs>=1.2.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "flake8>=6.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/akingdom/sync-state-bridge"
+Bug-Tracker = "https://github.com/akingdom/sync-state-bridge/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sync_state*"]
+exclude = ["tests", "docs", "example", "client"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.flake8]
+max-line-length = 120
+exclude = ["tests", "docs", "example", "client", "__pycache__"]

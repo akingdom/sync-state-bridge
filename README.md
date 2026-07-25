@@ -1,11 +1,14 @@
-# state-sync-bridge
+# sync-state-bridge
 
-A deterministic, race‑safe versioned delta-state synchronization engine for real-time applications.
+A deterministic, race‑safe state synchronisation bridge for real‑time applications, with built‑in QoS, backpressure handling, and network resilience.
 
 - **Versioned, per‑type sync** – each entity type has its own version history.
 - **Segmented deltas** – send only what changed, with a manifest first.
 - **FSM lifecycle** – correct handling of add→update→delete sequences.
 - **Resilient reconnection** – out‑of‑order drop, monotonicity guards, schema mismatch handling.
+- **Quality of Service (QoS)** – define drop policies (CRITICAL, CONFLATABLE, BEST_EFFORT) per entity type.
+- **Backpressure‑aware transports** – bounded queues, priority full‑snapshot injection, congestion metrics.
+- **Reconnecting client** – exponential backoff, version tracking, automatic recovery.
 - **Pure Python + JS** – no binary dependencies.
 
 ## Quick Start
@@ -13,38 +16,94 @@ A deterministic, race‑safe versioned delta-state synchronization engine for re
 Install the server package:
 
 ```bash
-pip install state-sync-bridge
+pip install sync-state-bridge
 ```
 
-Use it in your FastAPI app:
+For optional features (faster JSON, serial transport):
+
+```bash
+pip install sync-state-bridge[fast,serial]
+```
+
+### Basic Usage
 
 ```python
-from state_sync import StateSync
+from sync_state import StateSync, Presets
 
 sync = StateSync()
-sync.register_snapshot_provider("vehicles", get_vehicles)
+
+# Register a snapshot provider with a QoS profile
+sync.register_snapshot_provider(
+    "vehicles",
+    get_vehicles,
+    qos=Presets.low_bandwidth()   # optimised for slow links
+)
 
 # After changes:
 sync.mark_dirty("vehicles")
 await sync.commit()
 
-# Stream to client:
+# Stream deltas over HTTP (SSE)
+from fastapi import FastAPI, StreamingResponse
+app = FastAPI()
+
 @app.get("/stream")
 async def stream(versions: str = "{}"):
-    return StreamingResponse(sync.stream_deltas(json.loads(versions)))
+    return StreamingResponse(
+        sync.stream_deltas(json.loads(versions)),
+        media_type="text/event-stream"
+    )
 ```
 
-Client:
+### Socket Server (for low‑level IPC)
 
-```javascript
-import { StateClient } from 'state-sync-bridge';
+```python
+from sync_state.transports import StateSyncSocketServer
 
-const client = new StateClient('/stream');
-client.connect();
-client.setCallbacks({
-    onDelta: (delta) => console.log('Sync:', delta)
-});
+server = StateSyncSocketServer(sync)
+await server.start_tcp(host="0.0.0.0", port=8765)
 ```
+
+### Reconnecting Client
+
+```python
+from sync_state import StateSyncSocketClient
+
+def handle_delta(delta):
+    print(f"Update: {delta}")
+
+client = StateSyncSocketClient(
+    host="127.0.0.1",
+    port=8765,
+    on_delta_callback=handle_delta
+)
+await client.connect_and_listen()
+```
+
+## Quality of Service (QoS)
+
+Each entity type can have a `QoS` profile:
+
+| Policy        | Behaviour |
+|---------------|-----------|
+| `CRITICAL`    | Never dropped; queued until delivered. |
+| `CONFLATABLE` | Intermediate deltas dropped; only the latest is sent (ideal for high‑frequency telemetry). |
+| `BEST_EFFORT` | Discarded immediately under queue pressure. |
+
+Pre‑configured profiles (`Presets.conservative()`, `Presets.low_bandwidth()`, `Presets.high_throughput()`) are provided.
+
+## Testing
+
+Run the unit tests:
+
+```bash
+pytest tests/
+```
+
+The test suite covers:
+- Deterministic hashing (`canonical_hash`)
+- Commit & delta generation
+- Version‑gap full‑snapshot recovery
 
 ## Demos
 
@@ -55,85 +114,15 @@ Run the demos:
 
 ```bash
 cd examples/chat && python server.py
+```
+```bash
 cd examples/game && python server.py
 ```
+
+## Protocol
+
+See [`PROTOCOL.md`](./PROTOCOL.md) for the full SSE‑based delta protocol.
 
 ## License
 
 MIT
-```
-
-### `PROTOCOL.md`
-
-```markdown
-# SyncStateBridge Protocol (v4)
-
-## Messages
-
-All messages are Server‑Sent Events (SSE).
-
-### Manifest (event: manifest)
-
-Sent immediately on connection.
-
-```json
-{
-  "schema_version": 1,
-  "versions": { "vehicles": 42, "buildings": 12 },
-  "types": ["vehicles", "buildings"]
-}
-```
-
-### Delta (event: delta)
-
-Sent for each dirty type.
-
-```json
-{
-  "type": "vehicles",
-  "full": false,
-  "version": 42,
-  "added": [ { "id": "v-101", "x": 12.5 } ],
-  "updated": [ { "id": "v-88", "x": 99.1 } ],
-  "deleted": ["v-12"]
-}
-```
-
-If `full: true`, client must replace its local state for that type entirely.
-
-### Keepalive (event: keepalive)
-
-Sent every 15 seconds to keep the connection alive.
-
-## Versioning
-
-- Each type has its own independent version counter.
-- Client sends `versions` query parameter with its current versions for each type.
-- If client version is outside server history, server sends full snapshot.
-
-## FSM Rules (for delta generation)
-
-- **Added** → entity appears in delta.
-- **Updated** → entity appears in `updated`.
-- **Deleted** → entity appears in `deleted`.
-- If entity is added and deleted within the same delta window, it is omitted (net zero).
-- If entity is added and then updated within the same window, it remains `added` (latest payload).
-```
-
----
-
-## Final Steps
-
-- Place all files into the repository structure.
-- Run demos:
-
-```bash
-pip install fastapi uvicorn
-cd examples/chat
-uvicorn server:app --reload
-```
-
-- Open `http://localhost:8000` and start chatting.
-
-The game demo works similarly. Both demos use the real `StateSync` and `StateClient`, demonstrating the bridge’s capabilities.
-
