@@ -5,17 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sync-state-bridge"
 version = "1.0.0"
-description = "Versioned delta-state synchronization engine for real-time applications"
+description = "Versioned delta-state synchronization engine for real-time systems, IPC, and embedded applications"
 authors = [{name = "Andrew Kingdom", email = "1809762+akingdom@users.noreply.github.com"}]
 readme = "README.md"
 requires-python = ">=3.7"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE.md"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 dependencies = []
