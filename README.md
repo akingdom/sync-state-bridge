@@ -1,4 +1,4 @@
-![State Sync Diagram](splash.svg)
+![State Sync Diagram](diagram.svg)
 
 # sync-state-bridge
 
