@@ -1,6 +1,6 @@
 # state-sync-bridge
 
-A deterministic, race‑safe state synchronisation bridge for real‑time applications.
+A deterministic, race‑safe versioned delta-state synchronization engine for real-time applications.
 
 - **Versioned, per‑type sync** – each entity type has its own version history.
 - **Segmented deltas** – send only what changed, with a manifest first.
