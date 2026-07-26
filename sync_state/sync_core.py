@@ -264,3 +264,7 @@ class StateSync:
             # Remove this stream's event from the list
             if stream_event in self._stream_events:
                 self._stream_events.remove(stream_event)
+
+    def get_versions(self) -> Dict[str, int]: # 1.0.1
+        """Return a copy of the current version map for all tracked types."""
+        return dict(self._versions)
