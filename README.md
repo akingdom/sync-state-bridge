@@ -1,4 +1,4 @@
-![State Sync Diagram](diagram.svg)
+![State Sync Diagram](https://raw.githubusercontent.com/akingdom/sync-state-bridge/refs/heads/main/diagram.svg)
 
 # sync-state-bridge
 
@@ -109,8 +109,8 @@ The test suite covers:
 
 ## Demos
 
-- **Chat** – real‑time message broadcast with shared history.
-- **Game** – "Find the Clusters" demonstrating turn‑based sync.
+- [**Chat**](https://github.com/akingdom/sync-state-bridge/blob/main/example/chat/) – real‑time message broadcast with shared history.
+- [**Game**](https://github.com/akingdom/sync-state-bridge/blob/main/example/game/) – "Find the Clusters" demonstrating turn‑based sync.
 
 Run the demos:
 
@@ -123,7 +123,7 @@ cd examples/game && python server.py
 
 ## Protocol
 
-See [`PROTOCOL.md`](./PROTOCOL.md) for the full SSE‑based delta protocol.
+See [`PROTOCOL.md`](https://github.com/akingdom/sync-state-bridge/blob/main/PROTOCOL.md) for the full SSE‑based delta protocol.
 
 ## License
 

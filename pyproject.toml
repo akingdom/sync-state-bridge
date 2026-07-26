@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sync-state-bridge"
-version = "1.0.0"
+version = "1.0.3"
 description = "Versioned delta-state synchronization engine for real-time systems, IPC, and embedded applications"
 authors = [{name = "Andrew Kingdom", email = "1809762+akingdom@users.noreply.github.com"}]
 readme = "README.md"
@@ -37,10 +37,16 @@ dev = [
 Homepage = "https://github.com/akingdom/sync-state-bridge"
 Bug-Tracker = "https://github.com/akingdom/sync-state-bridge/issues"
 
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+sync_state = ["client/*.js"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sync_state*"]
-exclude = ["tests", "docs", "example", "client"]
+exclude = ["tests", "docs", "example"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -48,4 +54,4 @@ testpaths = ["tests"]
 
 [tool.flake8]
 max-line-length = 120
-exclude = ["tests", "docs", "example", "client", "__pycache__"]
+exclude = ["tests", "docs", "example", "__pycache__"]
