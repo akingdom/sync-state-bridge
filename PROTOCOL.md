@@ -1,4 +1,4 @@
-# **StateSync Protocol Specification (v1.0)**  
+# **StateSync Protocol Specification (v1.1)**  
 *A reactive, versioned, per‑type state synchronization protocol over Server‑Sent Events (SSE).*
 
 ---
@@ -231,15 +231,49 @@ Streams clean themselves up on exit.
 
 ---
 
-## **7. Client Behavior**
+## 7. Snapshot Chunking Protocol
 
-### **7.1 Version Tracking**
+When a full snapshot exceeds 64 KB, it is split into ordered chunks to prevent network fragmentation and improve reliability.
+
+### Chunk Frame Format
+
+```json
+{
+  "type": "SNAPSHOT_CHUNK",
+  "snapshot_id": "snap_abc123",
+  "chunk_idx": 0,
+  "total_chunks": 3,
+  "chunk_hash": "a1b2c3d4",
+  "data": "<base64_encoded_payload>"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `type` | Always `"SNAPSHOT_CHUNK"`. |
+| `snapshot_id` | Unique identifier for the full snapshot. |
+| `chunk_idx` | Zero‑based index of this chunk. |
+| `total_chunks` | Total number of chunks. |
+| `chunk_hash` | MD5 prefix (8 hex chars) of the raw chunk data. |
+| `data` | Base64‑encoded binary segment (max 64 KB before encoding). |
+
+### Reassembly Rules
+
+- Receivers must hold chunks for a **maximum of 5 seconds** before evicting incomplete snapshots.
+- Chunks **must** arrive in order (by `chunk_idx`), but out‑of‑order delivery is tolerated – reassembly uses the index to reconstruct the full payload.
+- If any chunk fails hash verification, the entire snapshot is discarded and a full new snapshot must be requested.
+
+---
+
+## **8. Client Behavior**
+
+### **8.1 Version Tracking**
 Client maintains:
 
 - `localVersions[type]` — last applied version  
 - `manifestVersions[type]` — server-reported version  
 
-### **7.2 Stale Delta Rejection**
+### **8.2 Stale Delta Rejection**
 Client rejects:
 
 ```
@@ -248,23 +282,23 @@ delta.version <= localVersions[type]
 
 Except for full snapshots.
 
-### **7.3 Full Snapshot Handling**
+### **8.3 Full Snapshot Handling**
 Full snapshots overwrite local state for that type.
 
-### **7.4 Schema Version Handling**
+### **8.4 Schema Version Handling**
 If schema version changes:
 
 - Client triggers `onSchemaMismatch`  
 - Application decides how to recover  
 
-### **7.5 Type Pruning**
+### **8.5 Type Pruning**
 If server removes a type:
 
 - Client deletes store[type]  
 - Client deletes localVersions[type]  
 - Client deletes manifestVersions[type]
 
-### **7.6 Reconnection Logic**
+### **8.6 Reconnection Logic**
 Client reconnects automatically with:
 
 - Guarded reconnection  
@@ -273,45 +307,45 @@ Client reconnects automatically with:
 
 ---
 
-## **8. Error Handling**
+## **9. Error Handling**
 
-### **8.1 Provider Errors**
+### **9.1 Provider Errors**
 Raise `ProviderValidationError`.  
 Dirty type is re-marked for retry.
 
-### **8.2 Transport Errors**
+### **9.2 Transport Errors**
 Client triggers:
 
 - `onError` callback  
 - Reconnection cycle  
 
-### **8.3 Schema Mismatch**
+### **9.3 Schema Mismatch**
 Client triggers:
 
 - `onSchemaMismatch` callback  
 
 ---
 
-## **9. Guarantees**
+## **10. Guarantees**
 
-### **9.1 Convergence**
+### **10.1 Convergence**
 Any compliant client will converge to server state.
 
-### **9.2 Deterministic Deltas**
+### **10.2 Deterministic Deltas**
 Lifecycle FSM ensures deterministic incremental updates.
 
-### **9.3 No Race Conditions**
+### **10.3 No Race Conditions**
 Locking model ensures atomicity.
 
-### **9.4 No Ghost Entities**
+### **10.4 No Ghost Entities**
 Type pruning prevents stale state.
 
-### **9.5 No Duplicate Streams**
+### **10.5 No Duplicate Streams**
 Client reconnection guards prevent multiple EventSources.
 
 ---
 
-## **10. Non‑Goals**
+## **11. Non‑Goals**
 
 StateSync does **not** provide:
 
@@ -326,12 +360,12 @@ These must be implemented externally.
 
 ---
 
-## **11. Versioning of the Protocol**
+## **12. Versioning of the Protocol**
 
 This specification describes:
 
 ```
-StateSync Protocol v1.0
+StateSync Protocol v1.1
 ```
 
 Schema versioning is independent and application‑defined.

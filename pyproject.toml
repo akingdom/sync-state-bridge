@@ -46,7 +46,7 @@ sync_state = ["client/*.js"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sync_state*"]
-exclude = ["tests", "docs", "example"]
+exclude = ["tests", "docs", "examples"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -54,4 +54,4 @@ testpaths = ["tests"]
 
 [tool.flake8]
 max-line-length = 120
-exclude = ["tests", "docs", "example", "__pycache__"]
+exclude = ["tests", "docs", "examples", "__pycache__"]

@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Swarm vs Asteroids – SyncStateBridge Demo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a1a; color: #eee; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; }
+        canvas { border: 1px solid #334; background: #111; display: block; cursor: crosshair; }
+        #info { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 8px 14px; border-radius: 6px; font-size: 14px; pointer-events: none; }
+        #controls { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 12px; background: rgba(0,0,0,0.8); padding: 10px 20px; border-radius: 10px; flex-wrap: wrap; justify-content: center; }
+        #controls button { background: #1a2a4a; border: none; color: white; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+        #controls button:hover { background: #2a4a7a; }
+        #controls .key-hint { font-size: 12px; color: #aaa; margin: 0 4px; }
+        .keys { display: flex; gap: 20px; margin: 0 10px; font-size: 12px; color: #aaa; }
+        .keys span { display: inline-block; background: #1a1a2e; padding: 2px 6px; border-radius: 3px; margin: 0 2px; }
+    </style>
+</head>
+<body>
+
+<div id="info">Particles: <span id="count">0</span> | FPS: <span id="fps">0</span> | Aggression: <span id="agg">0.00</span></div>
+
+<canvas id="canvas" width="1000" height="800"></canvas>
+
+<div id="controls">
+    <button id="join1">Join P1 (WASD / Z)</button>
+    <button id="join2">Join P2 (Arrows / .)</button>
+    <button id="join3">Join P3 (IJKL / ,)</button>
+    <span class="keys">Move: <span>↑</span><span>↓</span><span>←</span><span>→</span> Fire: <span>.</span></span>
+    <button id="spawn">+100 Particles</button>
+    <button id="clear">Clear Swarm</button>
+    <button id="reset">Reset Game</button>
+</div>
+
+<script type="importmap">
+{ "imports": { "state-sync-bridge": "/client/stateClient.js" } }
+</script>
+<script type="module">
+import { StateClient } from 'state-sync-bridge';
+
+// ------------------------------------------------------------------
+// DOM refs
+// ------------------------------------------------------------------
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const countEl = document.getElementById('count');
+const fpsEl = document.getElementById('fps');
+const aggEl = document.getElementById('agg');
+
+let particles = [];
+let asteroids = [];
+let players = [];
+let bullets = [];
+let myPid = null;  // set when joining
+
+// ------------------------------------------------------------------
+// StateClient
+// ------------------------------------------------------------------
+const client = new StateClient('/stream');
+
+client.setCallbacks({
+    onDelta: (delta) => {
+        if (delta.type === 'SNAPSHOT') {
+            // Rebuild all
+            const entities = delta.entities || [];
+            particles = entities.filter(e => e.id.startsWith('p'));
+            asteroids = entities.filter(e => e.id.startsWith('ast'));
+            players = entities.filter(e => e.id.startsWith('player'));
+            bullets = entities.filter(e => e.id.startsWith('bullet'));
+        } else if (delta.type === 'DELTA') {
+            for (const d of delta.deltas) {
+                const id = d.id;
+                const op = d.op;
+                const changes = d.changes || {};
+                // Find which list it belongs to
+                let list = null;
+                if (id.startsWith('p')) list = particles;
+                else if (id.startsWith('ast')) list = asteroids;
+                else if (id.startsWith('player')) list = players;
+                else if (id.startsWith('bullet')) list = bullets;
+                if (!list) continue;
+                const idx = list.findIndex(e => e.id === id);
+                if (op === 'delete') {
+                    if (idx !== -1) list.splice(idx, 1);
+                } else {
+                    const entity = { id, ...changes };
+                    if (idx !== -1) list[idx] = entity;
+                    else list.push(entity);
+                }
+            }
+        }
+        // Update counts and render
+        countEl.textContent = particles.length;
+        const agg = particles.length > 0 ? Math.min(1, (3000 - particles.length) / 3000) : 0;
+        aggEl.textContent = agg.toFixed(2);
+        render();
+    },
+    onManifest: () => {}
+});
+
+client.connect();
+
+// ------------------------------------------------------------------
+// Rendering
+// ------------------------------------------------------------------
+let frameCount = 0, lastFpsUpdate = 0;
+
+function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Asteroids
+    for (const a of asteroids) {
+        ctx.beginPath();
+        ctx.arc(a.x, a.y, a.radius, 0, 2*Math.PI);
+        ctx.fillStyle = '#666';
+        ctx.fill();
+        ctx.strokeStyle = '#999';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+
+    // Particles
+    for (const p of particles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2, 0, 2*Math.PI);
+        ctx.fillStyle = p.color || '#fff';
+        ctx.fill();
+    }
+
+    // Players
+    for (const p of players) {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.angle);
+        ctx.beginPath();
+        ctx.moveTo(20, 0);
+        ctx.lineTo(-12, -12);
+        ctx.lineTo(-12, 12);
+        ctx.closePath();
+        ctx.fillStyle = p.color || '#fff';
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+        // Show active indicator
+        if (p.active) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 24, 0, 2*Math.PI);
+            ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    }
+
+    // Bullets
+    for (const b of bullets) {
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 3, 0, 2*Math.PI);
+        ctx.fillStyle = '#ffaa00';
+        ctx.fill();
+    }
+
+    // FPS
+    const now = performance.now();
+    if (now - lastFpsUpdate > 1000) {
+        fpsEl.textContent = frameCount;
+        frameCount = 0;
+        lastFpsUpdate = now;
+    }
+    frameCount++;
+    requestAnimationFrame(render);
+}
+render();
+
+// ------------------------------------------------------------------
+// Keyboard handling
+// ------------------------------------------------------------------
+const keyMap = {
+    // Player 1: WASD + Z
+    'w': { pid: 0, key: 'up' },
+    's': { pid: 0, key: 'down' },
+    'a': { pid: 0, key: 'left' },
+    'd': { pid: 0, key: 'right' },
+    'z': { pid: 0, key: 'fire' },
+    // Player 2: Arrow keys + .
+    'ArrowUp': { pid: 1, key: 'up' },
+    'ArrowDown': { pid: 1, key: 'down' },
+    'ArrowLeft': { pid: 1, key: 'left' },
+    'ArrowRight': { pid: 1, key: 'right' },
+    '.': { pid: 1, key: 'fire' },
+    // Player 3: IJKL + ,
+    'i': { pid: 2, key: 'up' },
+    'k': { pid: 2, key: 'down' },
+    'j': { pid: 2, key: 'left' },
+    'l': { pid: 2, key: 'right' },
+    ',': { pid: 2, key: 'fire' },
+};
+
+const keysDown = {};
+
+document.addEventListener('keydown', (e) => {
+    const key = e.key;
+    // Prevent default for arrow keys, etc.
+    if (key.startsWith('Arrow') || key === '.' || key === ',') e.preventDefault();
+    const mapping = keyMap[key];
+    if (!mapping) return;
+    const pid = mapping.pid;
+    if (myPid !== null && myPid !== pid) return; // Only control your own ship
+    const k = mapping.key;
+    if (k === 'fire') {
+        // Send fire command
+        fetch('/fire', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pid })
+        });
+        return;
+    }
+    // Movement: send move command with current keys state
+    // We need to track all keys for this player.
+    if (!keysDown[pid]) keysDown[pid] = {};
+    keysDown[pid][k] = true;
+    sendMove(pid);
+});
+
+document.addEventListener('keyup', (e) => {
+    const key = e.key;
+    if (key.startsWith('Arrow') || key === '.' || key === ',') e.preventDefault();
+    const mapping = keyMap[key];
+    if (!mapping) return;
+    const pid = mapping.pid;
+    if (myPid !== null && myPid !== pid) return;
+    const k = mapping.key;
+    if (k === 'fire') return;
+    if (!keysDown[pid]) keysDown[pid] = {};
+    keysDown[pid][k] = false;
+    sendMove(pid);
+});
+
+function sendMove(pid) {
+    const kd = keysDown[pid] || {};
+    fetch('/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            pid,
+            keys: {
+                up: !!kd.up,
+                down: !!kd.down,
+                left: !!kd.left,
+                right: !!kd.right,
+            }
+        })
+    });
+}
+
+// ------------------------------------------------------------------
+// Join buttons
+// ------------------------------------------------------------------
+function join(pid) {
+    myPid = pid;
+    fetch('/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid }) });
+}
+
+document.getElementById('join1').onclick = () => join(0);
+document.getElementById('join2').onclick = () => join(1);
+document.getElementById('join3').onclick = () => join(2);
+
+// ------------------------------------------------------------------
+// Other controls
+// ------------------------------------------------------------------
+document.getElementById('spawn').onclick = () => {
+    fetch('/spawn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ count: 100 }) });
+};
+document.getElementById('clear').onclick = () => fetch('/clear', { method: 'POST' });
+document.getElementById('reset').onclick = () => {
+    if (confirm('Reset game?')) fetch('/reset', { method: 'POST' });
+};
+
+// ------------------------------------------------------------------
+// Mouse attraction (send attractor position)
+// ------------------------------------------------------------------
+canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+    // We can send as a command (not implemented in worker, but could be)
+    // For now, we ignore.
+});
+</script>
+</body>
+</html>

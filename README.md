@@ -94,6 +94,56 @@ Each entity type can have a `QoS` profile:
 
 Pre‑configured profiles (`Presets.conservative()`, `Presets.low_bandwidth()`, `Presets.high_throughput()`) are provided.
 
+## Advanced Features
+
+### QoS‑Aware Priority Queue
+
+The `PriorityQoSQueue` provides three tiers:
+- **CRITICAL** (Level 3) – never dropped.
+- **CONFLATABLE** (Level 2) – only the latest frame per entity is kept.
+- **BEST_EFFORT** (Level 1) – dropped under queue pressure.
+
+### Orchestrator (`SyncStateBridge`)
+
+Wraps `StateSync` to handle commands and pump deltas into transports.
+
+```python
+from sync_state import SyncStateBridge, AsyncIPCTransport
+
+bridge = SyncStateBridge()
+transport = AsyncIPCTransport(writer)  # e.g., a socket writer
+bridge.register_transport(transport)
+
+# In simulation loop:
+bridge.process_pending_commands(handler)
+bridge.track_change("player_1", "update", {"x": 10})
+bridge.commit_tick(tick_id)
+```
+
+### Snapshot Chunking
+
+Large snapshots are split into 64 KB chunks for reliable transmission.
+
+```python
+from sync_state import chunk_snapshot, SnapshotReassembler
+
+chunks = chunk_snapshot(state, "snap_123")
+reassembler = SnapshotReassembler()
+for chunk in chunks:
+    reassembler.ingest_chunk(chunk)
+```
+
+### Disk Persistence (WAL)
+
+Use `DiskPersistenceAdapter` to write an append‑only log for crash recovery.
+
+```python
+from sync_state import DiskPersistenceAdapter
+
+persistence = DiskPersistenceAdapter("logs/wal.bin", zero_loss_mode=True)
+bridge.register_transport(persistence)
+```
+
 ## Testing
 
 Run the unit tests:
