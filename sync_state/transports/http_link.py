@@ -48,10 +48,9 @@ class HTTPLink:
                 # Pass to router
                 receipt = await self.router.handle_frame_from_http(client_id, frame_bytes)
                 return receipt
-            except ValueError as e:
-                raise HTTPException(400, str(e))
-            except PermissionError as e:
-                raise HTTPException(403, str(e))
+            except HTTPException:
+                # Re-raise HTTP exceptions directly
+                raise
             except Exception as e:
                 logger.exception("Command error")
                 raise HTTPException(500, "Internal server error")
@@ -60,8 +59,6 @@ class HTTPLink:
         async def stream_events(client_id: str = Query(...)):
             queue = self.router.get_client_queue(client_id)
             async def event_generator():
-                # Send initial manifest and deltas? That would come from the worker via router.
-                # For simplicity, we just yield from the queue.
                 while True:
                     item = await queue.get()
                     if item is None:

@@ -42,11 +42,11 @@ class Router:
         type_config: mapping from type_name to RouterEntry.
         """
         self.type_config = type_config
-        self.client_queues: Dict[str, asyncio.Queue] = {}        # client_id -> queue
-        self.pending_futures: Dict[str, asyncio.Future] = {}     # command_id -> Future
-        self.pending_client: Dict[str, str] = {}                 # command_id -> client_id
-        self.pending_action: Dict[str, str] = {}                 # command_id -> action
-        self._loop = asyncio.get_event_loop()
+        self.client_queues: Dict[str, asyncio.Queue] = {}
+        self.pending_futures: Dict[str, asyncio.Future] = {}
+        self.pending_client: Dict[str, str] = {}
+        self.pending_action: Dict[str, str] = {}
+        self._loop = None
 
     def get_client_queue(self, client_id: str) -> asyncio.Queue:
         """Retrieve or create a client queue."""
@@ -59,6 +59,12 @@ class Router:
         Called by http_link when a POST /command arrives.
         Returns the immediate receipt dict.
         """
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+
+        # Create client queue if not exists
+        self.get_client_queue(client_id)
+
         # Parse the frame to extract metadata
         payload = json.loads(frame_bytes.decode())  # assumes JSON
         action = payload.get("action")
@@ -75,6 +81,12 @@ class Router:
             raise PermissionError(f"Type {type_name} is read‑only")
 
         command_id = payload.get("command_id") or str(uuid.uuid4())
+        # Ensure command_id is in payload for worker
+        payload["command_id"] = command_id
+        # Inject client_id for worker
+        payload["client_id"] = client_id
+        # Re-encode frame
+        frame_bytes = (json.dumps(payload) + "\n").encode()
 
         # Set up pending future if ack required
         if metadata.ack_timeout_ms is not None:
@@ -94,7 +106,7 @@ class Router:
             # No ack needed: no future
             self.pending_futures.pop(command_id, None)
 
-        # Forward the original frame bytes to the worker queue
+        # Forward the frame to the worker queue
         await entry.worker_queue.put(frame_bytes)
 
         return {"status": "received", "command_id": command_id}
@@ -116,14 +128,13 @@ class Router:
                     fault_handler(client_id, {"command_id": command_id, "action": action})
                 except Exception as e:
                     logger.exception("Fault handler error")
-            # Close client connection (send fault SSE)
+            # Send fault SSE event
             queue = self.client_queues.get(client_id)
             if queue:
                 await queue.put({
                     "event": "error",
                     "data": json.dumps({"fault": True, "command_id": command_id})
                 })
-            # Optionally, we could close the queue (but we keep it open for future resync)
 
     async def resolve_ack(self, ack_payload: bytes):
         """

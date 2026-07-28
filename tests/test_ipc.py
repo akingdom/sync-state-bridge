@@ -1,10 +1,5 @@
-"""
-tests/test_ipc.py
-
-Tests for DuplexIPCTransport.
-"""
-
 import asyncio
+import json
 import pytest
 import socket
 from sync_state.transports.ipc import DuplexIPCTransport, FRAME_COMMAND, FRAME_COMMAND_ACK
