@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-Worker – runs the game simulation, sends deltas to gateway via framed IPC,
-and receives commands (join, move, fire) as framed messages.
-Regenerated.
+Worker – full game with correct deletion: get_deltas() sends deletes before filtering.
 """
 import asyncio
 import json
@@ -11,15 +9,44 @@ import random
 import time
 import sys
 import traceback
+import struct
 from typing import Dict, List, Tuple, Optional
 
-# Import framing utilities from the sync_state package
-from sync_state.transports.ipc import read_payload, FRAME_DELTA
-# We'll define a new frame type for commands
+# ----------------------------------------------------------------------
+# Framing constants (MVP)
+# ----------------------------------------------------------------------
+MAGIC = b"SSB1"
+VERSION = 0x01
+FRAME_HEADER_SIZE = 12
 FRAME_COMMAND = 4
+FRAME_DELTA = 2
+
+def pack_header(frame_type: int, payload_len: int, flags: int = 0) -> bytes:
+    return struct.pack(">4sBBHI", MAGIC, VERSION, frame_type, flags, payload_len)
+
+def unpack_header(data: bytes):
+    magic, version, frame_type, flags, length = struct.unpack(">4sBBHI", data)
+    if magic != MAGIC:
+        raise ValueError("Invalid magic")
+    if version != VERSION:
+        raise ValueError(f"Unsupported version: {version}")
+    return frame_type, flags, length
+
+async def read_frame(reader: asyncio.StreamReader):
+    try:
+        header = await reader.readexactly(FRAME_HEADER_SIZE)
+    except asyncio.IncompleteReadError:
+        return None
+    frame_type, flags, length = unpack_header(header)
+    if length > 16 * 1024 * 1024:
+        raise ValueError("Frame too large")
+    payload = await reader.readexactly(length)
+    return frame_type, payload
+
+print("[Worker] Starting up...", file=sys.stderr)
 
 # ----------------------------------------------------------------------
-# Constants
+# Game constants (unchanged)
 # ----------------------------------------------------------------------
 W, H = 1000, 800
 PARTICLE_COUNT = 300
@@ -39,10 +66,8 @@ ASTEROID_SPLIT_IMMUNITY = 2.5
 ASTEROID_SPAWN_INTERVAL = 2.0
 SLOW_ASTEROID_TIMEOUT = 10.0
 
-print("[Worker] Starting up...", file=sys.stderr)
-
 # ----------------------------------------------------------------------
-# Helpers
+# Helpers (unchanged)
 # ----------------------------------------------------------------------
 def dist(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
@@ -65,7 +90,7 @@ def radius_from_area(area):
     return math.sqrt(area / math.pi)
 
 # ----------------------------------------------------------------------
-# Entities
+# Entities (unchanged)
 # ----------------------------------------------------------------------
 class Asteroid:
     _next_id = 0
@@ -93,6 +118,7 @@ class Asteroid:
 
     def split(self) -> List['Asteroid']:
         if self.radius < ASTEROID_MIN_RADIUS * 2:
+            self.alive = False
             return []
         self.alive = False
         num_pieces = random.randint(2, 3)
@@ -250,7 +276,6 @@ class Player:
         self.alive = True
         self.active = False
         self.respawn_timer = 0
-        print(f"[Worker] Player {self.pid} respawned at ({self.x:.1f}, {self.y:.1f})")
 
     def to_dict(self):
         return {
@@ -292,7 +317,7 @@ class Bullet:
 
 
 # ----------------------------------------------------------------------
-# Game State
+# GameState – correct deletion: get_deltas() filters after sending deletes
 # ----------------------------------------------------------------------
 class GameState:
     def __init__(self):
@@ -327,7 +352,7 @@ class GameState:
         p = Player(pid, spawn_pos)
         self.players.append(p)
         self.player_keys[pid] = {'up': False, 'down': False, 'left': False, 'right': False}
-        print(f"[Worker] Player {pid} joined at ({spawn_pos[0]:.1f}, {spawn_pos[1]:.1f})")
+        print(f"[Worker] Player {pid} joined")
         return True
 
     def set_keys(self, pid: int, keys: Dict[str, bool]):
@@ -342,6 +367,8 @@ class GameState:
 
     def update(self):
         self.tick += 1
+
+        # Update all entities
         for a in self.asteroids:
             a.update()
         for p in self.particles:
@@ -369,13 +396,27 @@ class GameState:
         for b in self.bullets:
             b.update()
 
+        # Remove very slow asteroids (fallback)
         for a in self.asteroids:
             if a.alive and time.time() - a.spawn_time > SLOW_ASTEROID_TIMEOUT and math.hypot(a.vx, a.vy) < 0.1:
                 a.alive = False
-                print(f"[Worker] Removing slow asteroid {a.id}")
 
-        # Asteroid vs asteroid
+        # Helper to spawn particles
+        def spawn_particles(x, y, count=2):
+            for _ in range(count):
+                p = SwarmParticle(
+                    self.next_particle_id,
+                    x=x + random.uniform(-6, 6),
+                    y=y + random.uniform(-6, 6),
+                    color=f"hsl({random.randint(0,360)}, 60%, 40%)"
+                )
+                self.particles.append(p)
+                self.next_particle_id += 1
+
+        # ---- Collision detection ----
         new_asteroids = []
+
+        # Asteroid vs Asteroid
         for i in range(len(self.asteroids)):
             a1 = self.asteroids[i]
             if not a1.alive or a1.is_protected():
@@ -385,11 +426,16 @@ class GameState:
                 if not a2.alive or a2.is_protected():
                     continue
                 if dist((a1.x, a1.y), (a2.x, a2.y)) < (a1.radius + a2.radius):
-                    new_asteroids.extend(a1.split())
-                    new_asteroids.extend(a2.split())
-        self.asteroids.extend(new_asteroids)
+                    if a1.radius < ASTEROID_MIN_RADIUS * 2 and a2.radius < ASTEROID_MIN_RADIUS * 2:
+                        a1.alive = False
+                        a2.alive = False
+                        spawn_particles(a1.x, a1.y)
+                        spawn_particles(a2.x, a2.y)
+                    else:
+                        new_asteroids.extend(a1.split())
+                        new_asteroids.extend(a2.split())
 
-        # Asteroid vs bullet
+        # Asteroid vs Bullet
         for b in self.bullets:
             if not b.alive:
                 continue
@@ -398,22 +444,14 @@ class GameState:
                     continue
                 if dist((b.x, b.y), (a.x, a.y)) < (a.radius + b.radius):
                     if a.radius >= ASTEROID_MIN_RADIUS * 2:
-                        self.asteroids.extend(a.split())
+                        new_asteroids.extend(a.split())
                     else:
-                        for _ in range(2):
-                            p = SwarmParticle(
-                                self.next_particle_id,
-                                x=a.x + random.uniform(-6, 6),
-                                y=a.y + random.uniform(-6, 6),
-                                color=f"hsl({random.randint(0,360)}, 60%, 40%)"
-                            )
-                            self.particles.append(p)
-                            self.next_particle_id += 1
-                    a.alive = False
+                        a.alive = False
+                        spawn_particles(a.x, a.y)
                     b.alive = False
                     break
 
-        # Asteroid vs ship
+        # Asteroid vs Ship
         for a in self.asteroids:
             if not a.alive or a.is_protected():
                 continue
@@ -421,11 +459,23 @@ class GameState:
                 if not p.alive:
                     continue
                 if dist((a.x, a.y), (p.x, p.y)) < (a.radius + p.collision_radius):
-                    print(f"[Worker] Player {p.pid} killed by asteroid {a.id}")
                     p.alive = False
                     p.respawn_timer = 0
+                    print(f"[Worker] Player {p.pid} killed by asteroid")
+                    break
 
-        # Spawn new asteroids
+        # Add new asteroids
+        self.asteroids.extend(new_asteroids)
+
+        # ---- DO NOT REMOVE DEAD ENTITIES HERE ----
+        # They will be removed in get_deltas() after sending delete messages.
+
+        # Cap particles
+        if len(self.particles) > MAX_PARTICLES:
+            excess = len(self.particles) - MAX_PARTICLES
+            del self.particles[:excess]
+
+        # Spawn new asteroids if needed
         if len(self.asteroids) < MIN_ASTEROIDS:
             self.spawn_timer += TICK
             if self.spawn_timer > ASTEROID_SPAWN_INTERVAL:
@@ -455,16 +505,19 @@ class GameState:
                     )
                     self.asteroids.append(new_ast)
 
-        if len(self.particles) > MAX_PARTICLES:
-            excess = len(self.particles) - MAX_PARTICLES
-            del self.particles[:excess]
-
         self.aggression = max(0, self.aggression - 0.001)
 
+    # ------------------------------------------------------------------
+    # get_deltas() – sends delete for dead entities, THEN removes them
+    # ------------------------------------------------------------------
     def get_deltas(self):
         deltas = []
+
+        # Particles: always update
         for p in self.particles:
             deltas.append({"id": p.id, "op": "update", "type": p.type, "changes": p.to_dict()})
+
+        # Asteroids: send delete if dead, update if alive
         dead_asteroids = []
         for a in self.asteroids:
             if a.alive:
@@ -474,12 +527,17 @@ class GameState:
                 deltas.append({"id": a.id, "op": "delete", "type": a.type})
         if dead_asteroids:
             print(f"[Worker] Deleting asteroids: {dead_asteroids}")
+        # Remove dead asteroids
         self.asteroids = [a for a in self.asteroids if a.alive]
+
+        # Players: delete if dead, update if alive
         for p in self.players:
             if p.alive:
                 deltas.append({"id": p.id, "op": "update", "type": p.type, "changes": p.to_dict()})
             else:
                 deltas.append({"id": p.id, "op": "delete", "type": p.type})
+
+        # Bullets: delete if dead, update if alive
         dead_bullets = []
         for b in self.bullets:
             if b.alive:
@@ -490,25 +548,9 @@ class GameState:
         if dead_bullets:
             print(f"[Worker] Deleting bullets: {dead_bullets}")
         self.bullets = [b for b in self.bullets if b.alive]
+
         return deltas
 
-
-# ----------------------------------------------------------------------
-# IPC Helpers (using sync_state.transports.ipc's packing functions)
-# ----------------------------------------------------------------------
-from sync_state.transports.ipc import pack_header
-
-async def send_delta(writer, payload: dict):
-    json_bytes = json.dumps(payload).encode('utf-8')
-    header = pack_header(FRAME_DELTA, len(json_bytes), 0)
-    writer.write(header + json_bytes)
-    await writer.drain()
-
-async def send_command(writer, cmd: dict):
-    json_bytes = json.dumps(cmd).encode('utf-8')
-    header = pack_header(FRAME_COMMAND, len(json_bytes), 0)
-    writer.write(header + json_bytes)
-    await writer.drain()
 
 # ----------------------------------------------------------------------
 # Main
@@ -525,6 +567,12 @@ async def connect_to_gateway(host='127.0.0.1', port=8766, max_attempts=20):
             await asyncio.sleep(delay)
     raise RuntimeError("Could not connect to gateway after multiple attempts")
 
+async def send_delta(writer, payload: dict):
+    json_bytes = json.dumps(payload).encode('utf-8')
+    header = pack_header(FRAME_DELTA, len(json_bytes), 0)
+    writer.write(header + json_bytes)
+    await writer.drain()
+
 async def main():
     print("[Worker] Initializing...", file=sys.stderr)
     try:
@@ -537,19 +585,18 @@ async def main():
     game = GameState()
     print("[Worker] Game started.", file=sys.stderr)
 
-    # Task to read incoming commands (framed)
     async def read_commands():
         while True:
             try:
-                frame_type, payload = await read_payload(reader)
-                if frame_type is None:
+                frame = await read_frame(reader)
+                if frame is None:
                     print("[Worker] Connection closed or read error", file=sys.stderr)
                     break
+                frame_type, payload = frame
                 if frame_type == FRAME_COMMAND:
                     line = payload.decode('utf-8').strip()
                     if not line:
                         continue
-                    print(f"[Worker] Received command: {line}")
                     try:
                         cmd = json.loads(line)
                     except json.JSONDecodeError as e:
@@ -571,11 +618,11 @@ async def main():
                         if pid is not None:
                             game.fire(pid)
                     elif action == "reset":
-                        # Delete everything and reinit
                         for lst in (game.particles, game.asteroids, game.players, game.bullets):
                             for e in lst:
                                 e.alive = False
-                        game.get_deltas()  # emit deletes
+                        # Force send deletes and reinit
+                        game.get_deltas()
                         game.__init__()
                         print("[Worker] Reset complete")
                     elif action == "spawn":
@@ -586,7 +633,10 @@ async def main():
                             game.next_particle_id += 1
                     elif action == "clear":
                         game.particles = []
-                # Ignore other frame types (e.g., if gateway sends deltas back)
+                    elif action == "ping":
+                        # ignore
+                        pass
+                # ignore other frame types
             except Exception as e:
                 print(f"[Worker] Command loop error: {e}", file=sys.stderr)
                 traceback.print_exc()
@@ -594,7 +644,6 @@ async def main():
 
     asyncio.create_task(read_commands())
 
-    # Main game loop
     try:
         while True:
             start = time.time()

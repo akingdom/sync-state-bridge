@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-Gateway – FastAPI server that:
-- Receives deltas from worker via framed IPC.
-- Maintains a ring buffer and current state.
-- Serves SSE streams to clients.
-- Forwards client commands (join, move, fire) to worker as framed messages.
-Regenerated
+Gateway – with framed commands.
 """
 import asyncio
 import json
 import sys
+import struct
 import socket
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -17,9 +13,34 @@ from fastapi.staticfiles import StaticFiles
 
 from sync_state import DeltaRingBuffer
 from sync_state.js import get_client_js_content
-from sync_state.transports.ipc import read_payload, FRAME_DELTA, pack_header
 
+MAGIC = b"SSB1"
+VERSION = 0x01
+FRAME_HEADER_SIZE = 12
 FRAME_COMMAND = 4
+FRAME_DELTA = 2
+
+def pack_header(frame_type: int, payload_len: int, flags: int = 0) -> bytes:
+    return struct.pack(">4sBBHI", MAGIC, VERSION, frame_type, flags, payload_len)
+
+def unpack_header(data: bytes):
+    magic, version, frame_type, flags, length = struct.unpack(">4sBBHI", data)
+    if magic != MAGIC:
+        raise ValueError("Invalid magic")
+    if version != VERSION:
+        raise ValueError(f"Unsupported version: {version}")
+    return frame_type, flags, length
+
+async def read_frame(reader: asyncio.StreamReader):
+    try:
+        header = await reader.readexactly(FRAME_HEADER_SIZE)
+    except asyncio.IncompleteReadError:
+        return None
+    frame_type, flags, length = unpack_header(header)
+    if length > 16 * 1024 * 1024:
+        raise ValueError("Frame too large")
+    payload = await reader.readexactly(length)
+    return frame_type, payload
 
 print("[Gateway] Starting up...", file=sys.stderr)
 
@@ -28,6 +49,7 @@ ring = DeltaRingBuffer(capacity=500)
 current_state = {}
 client_queues = set()
 worker_writer = None
+write_lock = asyncio.Lock()
 
 async def forward_to_worker(action: str, params: dict = None):
     global worker_writer
@@ -35,33 +57,35 @@ async def forward_to_worker(action: str, params: dict = None):
         print("[Gateway] Worker not connected", file=sys.stderr)
         return False
     cmd = {"action": action, "params": params or {}}
-    try:
-        json_bytes = json.dumps(cmd).encode('utf-8')
-        header = pack_header(FRAME_COMMAND, len(json_bytes), 0)
-        frame = header + json_bytes
-        worker_writer.write(frame)
-        await worker_writer.drain()
-        print(f"[Gateway] Sent command: {action} {params}")
-        return True
-    except Exception as e:
-        print(f"[Gateway] Error forwarding command: {e}", file=sys.stderr)
-        return False
+    json_bytes = json.dumps(cmd).encode('utf-8')
+    header = pack_header(FRAME_COMMAND, len(json_bytes), 0)
+    frame = header + json_bytes
+    async with write_lock:
+        try:
+            worker_writer.write(frame)
+            await worker_writer.drain()
+            await asyncio.sleep(0)
+            print(f"[Gateway] Sent command: {action} {params}")
+            return True
+        except Exception as e:
+            print(f"[Gateway] Error forwarding command: {e}", file=sys.stderr)
+            return False
 
 async def ping_worker():
     global worker_writer
     while True:
         await asyncio.sleep(2.0)
         if worker_writer:
-            try:
-                cmd = {"action": "ping", "params": {}}
-                json_bytes = json.dumps(cmd).encode('utf-8')
-                header = pack_header(FRAME_COMMAND, len(json_bytes), 0)
-                frame = header + json_bytes
-                worker_writer.write(frame)
-                await worker_writer.drain()
-                # print("[Gateway] Ping sent")  # optional: reduce noise
-            except Exception as e:
-                print(f"[Gateway] Ping error: {e}")
+            cmd = {"action": "ping", "params": {}}
+            json_bytes = json.dumps(cmd).encode('utf-8')
+            header = pack_header(FRAME_COMMAND, len(json_bytes), 0)
+            frame = header + json_bytes
+            async with write_lock:
+                try:
+                    worker_writer.write(frame)
+                    await worker_writer.drain()
+                except Exception as e:
+                    print(f"[Gateway] Ping error: {e}")
 
 async def ipc_server():
     server = await asyncio.start_server(
@@ -82,9 +106,10 @@ async def handle_worker(reader, writer):
         print(f"[Gateway] Worker connected, fd: {sock.fileno()}")
     try:
         while True:
-            frame_type, payload = await read_payload(reader)
-            if frame_type is None:
+            frame = await read_frame(reader)
+            if frame is None:
                 break
+            frame_type, payload = frame
             if frame_type == FRAME_DELTA:
                 line = payload.decode('utf-8').strip()
                 if not line:
@@ -104,13 +129,12 @@ async def handle_worker(reader, writer):
                     else:
                         entity = {"id": eid, **d.get("changes", {})}
                         current_state[t][eid] = entity
-                # Broadcast to SSE clients
                 for q in list(client_queues):
                     try:
                         q.put_nowait(line)
                     except asyncio.QueueFull:
                         client_queues.remove(q)
-            # Ignore other frame types (e.g., if worker sends commands back)
+            # Ignore other frame types
     except Exception as e:
         print(f"[Gateway] Worker error: {e}")
     finally:

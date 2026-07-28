@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-<!--regenerated-->
 <html>
 <head>
     <meta charset="UTF-8">
@@ -166,11 +165,12 @@
         eventSource.addEventListener('delta', (e) => {
             try {
                 const data = JSON.parse(e.data);
+                console.log('Delta event:', data);
                 const tick = data.tick;
 
                 // --- SNAPSHOT ---
                 if (data.type === 'SNAPSHOT') {
-                    console.log('Snapshot received');
+                    console.log('Snapshot received, entities:', data.entities);
                     entities.particle = [];
                     entities.asteroid = [];
                     entities.player   = [];
@@ -180,19 +180,21 @@
                         list.push({ id: entity.id, ...entity });
                     }
                     lastTick = tick || 0;
+                    console.log('Snapshot processed, players:', entities.player);
                     return;
                 }
 
                 // --- DELTAS ---
                 if (tick > lastTick && data.deltas) {
                     lastTick = tick;
+                    console.log(`Processing ${data.deltas.length} deltas at tick ${tick}`);
                     for (const d of data.deltas) {
                         const id = d.id;
                         const op = d.op;
                         const type = d.type;
                         const changes = d.changes || {};
-
                         if (op === 'delete') {
+                            console.log(`Deleting ${type} ${id}`);
                             if (type === 'particle') {
                                 entities.particle = entities.particle.filter(e => e.id !== id);
                             } else if (type === 'asteroid') {
@@ -218,6 +220,9 @@
                             list[idx] = entity;
                         } else {
                             list.push(entity);
+                        }
+                        if (type === 'player') {
+                            console.log(`Player ${id} updated:`, entity);
                         }
                     }
                     const agg = entities.particle.length > 0 ? Math.min(1, (300 - entities.particle.length) / 300) : 0;
