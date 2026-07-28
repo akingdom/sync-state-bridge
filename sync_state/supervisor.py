@@ -57,17 +57,13 @@ class Supervisor:
 
     def _launch_worker(self) -> None:
         self._worker_proc = subprocess.Popen(
-            [sys.executable, self.worker_script] + self.worker_args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            [sys.executable, "-u", self.worker_script] + self.worker_args,
         )
         logger.info("Worker started (PID %d)", self._worker_proc.pid)
-
+    
     def _launch_gateway(self) -> None:
         self._gateway_proc = subprocess.Popen(
-            [sys.executable, self.gateway_script] + self.gateway_args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            [sys.executable, "-u", self.gateway_script] + self.gateway_args,
         )
         logger.info("Gateway started (PID %d)", self._gateway_proc.pid)
 

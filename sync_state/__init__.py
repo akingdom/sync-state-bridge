@@ -14,7 +14,7 @@ from .qos_queue import PriorityQoSQueue
 from .ring_buffer import DeltaRingBuffer
 from .chunking import chunk_snapshot, SnapshotReassembler
 from .transports.base import TransportAdapter, TransportMetrics
-from .transports.ipc import AsyncIPCTransport
+from .transports.ipc import FramedIPCTransport, FRAME_DELTA, FRAME_COMMAND, FRAME_SNAPSHOT_CHUNK
 from .transports.disk import DiskPersistenceAdapter
 
 # Optional
@@ -31,7 +31,7 @@ __all__ = [
     "Presets",
     "StateSyncSocketClient",
     "get_client_js_content",
-    # New
+    # Bridge
     "SyncStateBridge",
     "PriorityQoSQueue",
     "DeltaRingBuffer",
@@ -39,6 +39,9 @@ __all__ = [
     "SnapshotReassembler",
     "TransportAdapter",
     "TransportMetrics",
-    "AsyncIPCTransport",
+    "FramedIPCTransport",
+    "FRAME_DELTA",
+    "FRAME_COMMAND",
+    "FRAME_SNAPSHOT_CHUNK",
     "DiskPersistenceAdapter",
 ]
