@@ -1,6 +1,6 @@
 ![State Sync Diagram](https://raw.githubusercontent.com/akingdom/sync-state-bridge/refs/heads/main/diagram.svg)
 
-# sync-state-bridge
+# [sync-state-bridge](https://github.com/akingdom/sync-state-bridge/)
 
 A deterministic, race‑safe state synchronisation bridge for real‑time applications, with built‑in QoS, backpressure handling, and network resilience.
 
