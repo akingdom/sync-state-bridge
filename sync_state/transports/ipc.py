@@ -2,6 +2,7 @@
 sync_state/transports/ipc.py
 
 Length‑prefixed framed transport for reliable IPC.
+Extended with DuplexIPCTransport and new frame types.
 """
 
 import asyncio
@@ -11,6 +12,7 @@ import logging
 import time
 import socket
 import os
+import json
 from typing import Optional, BinaryIO, Union, Tuple
 
 from .base import TransportAdapter, TransportMetrics
@@ -23,6 +25,7 @@ FRAME_HEADER_SIZE = 4 + 1 + 1 + 2 + 4  # 12 bytes
 FRAME_DELTA = 1
 FRAME_COMMAND = 2
 FRAME_SNAPSHOT_CHUNK = 3
+FRAME_COMMAND_ACK = 4          # new
 
 logger = logging.getLogger("sync_state.transports.ipc")
 
@@ -154,3 +157,64 @@ async def read_payload(reader: asyncio.StreamReader) -> Tuple[int, bytes]:
         return None, None
     frame_type, _, _ = unpack_header(frame[:FRAME_HEADER_SIZE])
     return frame_type, frame[FRAME_HEADER_SIZE:]
+
+
+# ---------- NEW DuplexIPCTransport ----------
+class DuplexIPCTransport:
+    """
+    Asynchronous, full‑duplex framing layer over a (reader, writer) pair.
+    Supports sending/receiving all frame types.
+    """
+
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self.reader = reader
+        self.writer = writer
+        self._closed = False
+
+    async def send_frame(self, frame_type: int, payload: bytes, flags: int = 0) -> None:
+        if self._closed:
+            raise RuntimeError("Transport closed")
+        header = pack_header(frame_type, len(payload), flags)
+        self.writer.write(header + payload)
+        await self.writer.drain()
+
+    async def send_command(self, command_id: str, action: str, params: dict, client_id: str) -> None:
+        payload = json.dumps({
+            "command_id": command_id,
+            "action": action,
+            "params": params,
+            "client_id": client_id
+        }).encode()
+        await self.send_frame(FRAME_COMMAND, payload)
+
+    async def send_ack(self, command_id: str, status: str, result: dict, tick_id: int) -> None:
+        payload = json.dumps({
+            "command_id": command_id,
+            "status": status,
+            "result": result,
+            "tick_id": tick_id
+        }).encode()
+        await self.send_frame(FRAME_COMMAND_ACK, payload)
+
+    async def send_delta(self, delta: dict) -> None:
+        payload = (json.dumps(delta) + "\n").encode()
+        await self.send_frame(FRAME_DELTA, payload)
+
+    async def read_frame(self) -> Tuple[Optional[int], Optional[bytes]]:
+        if self._closed:
+            return None, None
+        frame = await read_frame(self.reader)
+        if frame is None:
+            self._closed = True
+            return None, None
+        frame_type, _, _ = unpack_header(frame[:FRAME_HEADER_SIZE])
+        payload = frame[FRAME_HEADER_SIZE:]
+        return frame_type, payload
+
+    async def close(self):
+        self._closed = True
+        self.writer.close()
+        try:
+            await self.writer.wait_closed()
+        except Exception:
+            pass

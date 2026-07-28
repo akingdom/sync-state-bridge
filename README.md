@@ -144,6 +144,92 @@ persistence = DiskPersistenceAdapter("logs/wal.bin", zero_loss_mode=True)
 bridge.register_transport(persistence)
 ```
 
+## Bidirectional Control & Receipts
+
+### Entity Configuration: Read‑Only vs Read‑Write
+When registering a snapshot provider, you can now set its access direction and receipt timeout:
+
+```python
+from sync_state import StateSync, TypeMetadata, SyncDirection, Presets
+
+sync = StateSync()
+
+# Read‑write actuator (requires ack within 500ms)
+sync.register_snapshot_provider(
+    "robots",
+    get_robots,
+    metadata=TypeMetadata(
+        type_name="robots",
+        direction=SyncDirection.BIDIRECTIONAL,
+        ack_timeout_ms=500,
+        fault_handler=lambda client_id, ctx: set_gpio(SAFETY_PIN, LOW)
+    )
+)
+
+# Read‑only telemetry (no commands allowed)
+sync.register_snapshot_provider(
+    "sensors",
+    get_sensors,
+    metadata=TypeMetadata(
+        type_name="sensors",
+        direction=SyncDirection.UNIDIRECTIONAL
+    )
+)
+```
+
+### Sending Commands from JavaScript Client
+The client now supports sending commands with automatic command IDs:
+
+```javascript
+import { StateClient } from './stateClient.js';
+
+const client = new StateClient("http://localhost:8000");
+client.setCallbacks({
+    onCommandAck: (ack) => {
+        console.log(`Command ${ack.command_id} completed: ${ack.status}`);
+        if (ack.status === 'ok') {
+            console.log(`Result tick: ${ack.result.tick}`);
+        }
+    },
+    onError: (err) => {
+        if (err.fault) {
+            console.error("Fault detected! Hardware emergency stop triggered.");
+        }
+    }
+});
+client.connect();
+
+// Send a command
+const receipt = await client.sendCommand('robots:move', { x: 10, y: 20 });
+console.log('Command received by gateway:', receipt.command_id);
+```
+
+### Handling Receipts and Faults
+- **Immediate Receipt:** The `sendCommand()` promise resolves with `{status:"received", command_id}` as soon as the HTTP POST returns.
+- **Action Receipt:** The `onCommandAck` callback is invoked when the Worker finishes processing.
+- **Fault:** If the Worker does not ack within `ack_timeout_ms`, the `onError` callback is invoked with `fault: true`. The connection is closed automatically.
+
+### Worker‑Side Command Handler
+In the Worker process, define how commands translate to state mutations:
+
+```python
+# worker.py
+def command_handler(action: str, params: dict) -> dict:
+    type_name, operation = action.split(":", 1)
+    if operation == "move":
+        bridge.track_change(params["id"], "update", {"x": params["x"], "y": params["y"]})
+        bridge.commit_tick(bridge.current_tick + 1)
+        return {"status": "ok", "tick": bridge.current_tick}
+    else:
+        raise ValueError(f"Unknown operation: {operation}")
+
+bridge.register_command_handler(command_handler)
+```
+
+### Zero‑Tolerance (Immediate Fault) Mode
+For safety‑critical actuators, set `ack_timeout_ms=0`. The Gateway will trigger a fault **if the Worker does not acknowledge synchronously**.
+
+
 ## Testing
 
 Run the unit tests:
@@ -178,3 +264,4 @@ See [`PROTOCOL.md`](https://github.com/akingdom/sync-state-bridge/blob/main/PROT
 ## License
 
 MIT
+

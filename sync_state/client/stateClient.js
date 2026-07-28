@@ -1,12 +1,13 @@
 // client/stateClient.js
 export class StateClient {
-    constructor(url, idKey = 'id') {
+    constructor(url, idKey = 'id', clientId = null) {
         this.url = url;
         this.idKey = idKey;
         this.localVersions = {};
         this.manifestVersions = {};
         this.store = {};
         this.schemaVersion = null;
+        this.clientId = clientId || this._generateClientId();
 
         this.eventSource = null;
         this.isConnecting = false;
@@ -18,7 +19,12 @@ export class StateClient {
             onManifest: null,
             onError: null,
             onSchemaMismatch: null,
+            onCommandAck: null,
         };
+    }
+
+    _generateClientId() {
+        return 'client_' + Math.random().toString(36).substring(2, 10);
     }
 
     setCallbacks(callbacks) {
@@ -30,7 +36,7 @@ export class StateClient {
         this.isConnecting = true;
 
         const versionParam = encodeURIComponent(JSON.stringify(this.localVersions));
-        const streamUrl = `${this.url}?versions=${versionParam}`;
+        const streamUrl = `${this.url}?versions=${versionParam}&client_id=${this.clientId}`;
 
         const es = new EventSource(streamUrl);
         this.eventSource = es;
@@ -61,12 +67,56 @@ export class StateClient {
             }
         });
 
-        es.addEventListener('keepalive', () => {});
+        // New: command_ack
+        es.addEventListener('command_ack', (e) => {
+            try {
+                const ack = JSON.parse(e.data);
+                if (this.callbacks.onCommandAck) {
+                    this.callbacks.onCommandAck(ack);
+                }
+            } catch (err) {
+                console.error('[StateClient] Command ack parse error:', err);
+            }
+        });
 
-        es.onerror = (err) => {
-            console.error('[StateClient] Transport error:', err);
-            this._handleDisconnect(err);
-        };
+        es.addEventListener('error', (e) => {
+            // SSE error may contain fault data
+            if (e.data) {
+                try {
+                    const errData = JSON.parse(e.data);
+                    if (errData.fault) {
+                        console.error('[StateClient] Fault detected:', errData);
+                        if (this.callbacks.onError) {
+                            this.callbacks.onError({ fault: true, ...errData });
+                        }
+                        this.disconnect();
+                        return;
+                    }
+                } catch (_) {}
+            }
+            // Otherwise treat as normal disconnect
+            this._handleDisconnect(e);
+        });
+
+        es.addEventListener('keepalive', () => {});
+    }
+
+    // New: send command
+    async sendCommand(action, params, commandId = null) {
+        if (!commandId) {
+            commandId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36);
+        }
+        const url = `${this.url}/command?client_id=${this.clientId}`;
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command_id: commandId, action, params })
+        });
+        if (!response.ok) {
+            const err = await response.text();
+            throw new Error(`Command failed: ${response.status} - ${err}`);
+        }
+        return await response.json();  // immediate receipt
     }
 
     disconnect() {

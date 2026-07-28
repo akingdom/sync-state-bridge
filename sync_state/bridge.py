@@ -3,6 +3,7 @@ sync_state/bridge.py
 
 SyncStateBridge: orchestrator wrapping StateSync, handling commands,
 and pumping deltas into transports via PriorityQoSQueue.
+Extended with command handling and fault flag.
 """
 
 import time
@@ -18,10 +19,10 @@ from .chunking import chunk_snapshot
 
 logger = logging.getLogger("sync_state.bridge")
 
+
 class SyncStateBridge:
     """
     Orchestrator that wraps StateSync and manages transport emission.
-
     It also handles command ingestion (from UI or gateway) and can emit
     full snapshots using chunking.
     """
@@ -33,10 +34,44 @@ class SyncStateBridge:
         self._transports: List[TransportAdapter] = []
         self._pending_deltas: List[Dict[str, Any]] = []
         self._command_queue = queue.Queue(maxsize=command_queue_maxsize)
+        self._faulted = False
+        self._command_handler: Optional[Callable[[str, dict], dict]] = None
+        self._fault_handlers: List[Callable[[str], None]] = []
 
     def register_transport(self, transport: TransportAdapter) -> None:
         """Add an egress transport."""
         self._transports.append(transport)
+
+    def register_command_handler(self, handler: Callable[[str, dict], dict]) -> None:
+        """Set the function that processes commands: receives (action, params) -> returns result dict."""
+        self._command_handler = handler
+
+    def register_fault_handler(self, handler: Callable[[str], None]) -> None:
+        """Register a callback for local fault detection."""
+        self._fault_handlers.append(handler)
+
+    def set_fault(self, message: str) -> None:
+        """Trigger a fault, preventing further commits."""
+        self._faulted = True
+        logger.critical("Fault triggered: %s", message)
+        for handler in self._fault_handlers:
+            try:
+                handler(message)
+            except Exception as e:
+                logger.error("Fault handler failed: %s", e)
+
+    def handle_command(self, action: str, params: dict) -> dict:
+        """Synchronous command dispatcher. Raises if no handler or faulted."""
+        if self._faulted:
+            raise RuntimeError("Bridge is faulted; commands not accepted")
+        if self._command_handler is None:
+            raise RuntimeError("No command handler registered")
+        try:
+            result = self._command_handler(action, params)
+        except Exception as e:
+            logger.exception("Command handler error")
+            return {"error": str(e)}
+        return result
 
     def track_change(self, entity_id: str, op: str, changes: Dict[str, Any]) -> None:
         """
@@ -95,7 +130,10 @@ class SyncStateBridge:
     def commit_tick(self, tick_id: int) -> None:
         """
         Commit the current tick: flush pending deltas to the transports.
+        Raises RuntimeError if faulted.
         """
+        if self._faulted:
+            raise RuntimeError("Bridge is faulted; cannot commit")
         self.current_tick = tick_id
 
         if not self._pending_deltas:

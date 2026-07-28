@@ -1,42 +1,46 @@
-# **StateSync Protocol Specification (v1.1)**  
-*A reactive, versioned, per‑type state synchronization protocol over Server‑Sent Events (SSE).*
+# StateSync Protocol Specification (v1.2)
+
+*A reactive, versioned, per‑type state synchronization protocol over Server‑Sent Events (SSE), with bidirectional command and receipt extensions.*
 
 ---
 
-## **1. Purpose**
+## 1. Purpose
+
 StateSync is a **real‑time, incremental synchronization protocol** designed for applications that maintain shared state across multiple clients. It provides:
 
-- Deterministic per‑type versioning  
-- Incremental deltas with lifecycle semantics  
-- Full snapshot fallback  
-- Reactive push‑based updates  
-- Schema versioning  
-- Transport via SSE  
+- Deterministic per‑type versioning
+- Incremental deltas with lifecycle semantics
+- Full snapshot fallback
+- Reactive push‑based updates
+- Schema versioning
+- Transport via SSE
+- **Bidirectional command/response with configurable receipts and fault semantics**
 
-StateSync guarantees that any compliant client can converge to the server’s authoritative state without requiring polling or bidirectional communication.
+StateSync guarantees that any compliant client can converge to the server’s authoritative state with minimal overhead.
 
 ---
 
-## **2. Core Concepts**
+## 2. Core Concepts
 
-### **2.1 Types**
+### 2.1 Types
 State is partitioned into **types** (e.g., `"users"`, `"tasks"`, `"messages"`).  
 Each type has:
 
-- A **snapshot provider**  
-- A **current snapshot**  
-- A **version counter**  
-- A **change log**  
+- A **snapshot provider**
+- A **current snapshot**
+- A **version counter**
+- A **change log**
+- **Access policy** (read‑only or read‑write) and **receipt policy**
 
-### **2.2 Entities**
+### 2.2 Entities
 Each entity:
 
-- Is a dictionary/object  
-- Must contain a unique identifier under `id_key` (default `"id"`)  
-- May contain arbitrary nested fields  
+- Is a dictionary/object
+- Must contain a unique identifier under `id_key` (default `"id"`)
+- May contain arbitrary nested fields
 - May optionally contain `_v` (explicit version)
 
-### **2.3 Versioning**
+### 2.3 Versioning
 Each type maintains an independent monotonically increasing integer version:
 
 ```
@@ -45,7 +49,7 @@ versions[type] ∈ ℕ
 
 Version increments only when the snapshot for that type changes.
 
-### **2.4 Change Log**
+### 2.4 Change Log
 For each type, the server stores a bounded history of deltas:
 
 ```
@@ -65,9 +69,9 @@ Each entry contains:
 
 ---
 
-## **3. Snapshot Providers**
+## 3. Snapshot Providers
 
-### **3.1 Requirements**
+### 3.1 Requirements
 A snapshot provider must return:
 
 ```
@@ -80,63 +84,63 @@ Each dict must:
 - Have a unique ID (string or integer)
 - Be JSON‑serializable after sanitization
 
-### **3.2 Validation**
+### 3.2 Validation
 The server performs strict validation:
 
-- Return type must be list/tuple  
-- Each entity must be a dict  
-- ID must exist and be str/int  
-- No duplicate IDs  
-- Entities are deep‑copied to prevent mutation  
+- Return type must be list/tuple
+- Each entity must be a dict
+- ID must exist and be str/int
+- No duplicate IDs
+- Entities are deep‑copied to prevent mutation
 
 Invalid provider output raises `ProviderValidationError`.
 
 ---
 
-## **4. Commit Cycle**
+## 4. Commit Cycle
 
-### **4.1 Dirty Types**
+### 4.1 Dirty Types
 The server tracks types marked dirty via:
 
 ```
 mark_dirty(type)
 ```
 
-### **4.2 Commit Steps**
+### 4.2 Commit Steps
 Commit consists of:
 
-1. Capture dirty types under lock  
-2. Execute providers outside lock  
-3. Validate and sanitize snapshots  
-4. Apply changes under lock  
-5. Compute added/updated/deleted  
-6. Append delta to change log  
-7. Update current snapshot  
-8. Increment version  
+1. Capture dirty types under lock
+2. Execute providers outside lock
+3. Validate and sanitize snapshots
+4. Apply changes under lock
+5. Compute added/updated/deleted
+6. Append delta to change log
+7. Update current snapshot
+8. Increment version
 9. Notify active streams
 
 Commit is atomic per type.
 
 ---
 
-## **5. Delta Semantics**
+## 5. Delta Semantics
 
-### **5.1 Full Snapshot Conditions**
+### 5.1 Full Snapshot Conditions
 A full snapshot is returned when:
 
-- No history exists  
-- Client version < earliest history version  
-- Client version > current version  
-- History was truncated  
+- No history exists
+- Client version < earliest history version
+- Client version > current version
+- History was truncated
 
-### **5.2 Incremental Delta Conditions**
+### 5.2 Incremental Delta Conditions
 Incremental deltas are returned when:
 
 ```
 history exists AND earliest_history_version ≤ client_version ≤ current_version
 ```
 
-### **5.3 Lifecycle FSM**
+### 5.3 Lifecycle FSM
 The server computes entity lifecycle transitions using a finite‑state machine:
 
 | Previous State | Event     | New State |
@@ -152,11 +156,11 @@ The server computes entity lifecycle transitions using a finite‑state machine:
 
 This ensures correct behavior for sequences like:
 
-- delete → add → update  
-- add → delete  
-- update → delete  
+- delete → add → update
+- add → delete
+- update → delete
 
-### **5.4 Delta Payload**
+### 5.4 Delta Payload
 Incremental delta:
 
 ```json
@@ -185,16 +189,18 @@ Full snapshot:
 
 ---
 
-## **6. Transport Layer (SSE)**
+## 6. Transport Layer (SSE)
 
-### **6.1 Connection Initialization**
+### 6.1 Connection Initialization
 Client sends:
 
 ```
-GET /stream?versions=<json_encoded_local_versions>
+GET /stream?versions=<json_encoded_local_versions>&client_id=<client_id>
 ```
 
-### **6.2 Initial Manifest**
+The `client_id` is generated by the client and used to route command receipts back to the correct connection.
+
+### 6.2 Initial Manifest
 Server sends:
 
 ```json
@@ -206,18 +212,18 @@ data: {
 }
 ```
 
-### **6.3 Initial Deltas**
+### 6.3 Initial Deltas
 Server sends all deltas required to bring client up to date.
 
-### **6.4 Reactive Updates**
+### 6.4 Reactive Updates
 Server maintains a list of per‑stream events.  
 On commit:
 
-- All stream events are triggered  
-- Streams compute new deltas  
+- All stream events are triggered
+- Streams compute new deltas
 - Streams send them immediately
 
-### **6.5 Keepalive**
+### 6.5 Keepalive
 If no commit occurs within `keepalive_interval`:
 
 ```json
@@ -225,13 +231,89 @@ event: keepalive
 data: {}
 ```
 
-### **6.6 Disconnect Handling**
+### 6.6 Disconnect Handling
 Every `yield` is wrapped in a disconnect guard.  
 Streams clean themselves up on exit.
 
 ---
 
-## 7. Snapshot Chunking Protocol
+## 7. Bidirectional Command & Receipt Protocol
+
+### 7.1 Access Control
+Each entity type defines its access policy via the `direction` field:
+- `ro` (Unidirectional): The server rejects any command targeting this type.
+- `rw` (Bidirectional): The server accepts commands.
+
+### 7.2 Command Lifecycle
+1. **Submission (HTTP)** – Client POSTs to `/command?client_id=<id>` with JSON body:
+   ```json
+   {
+     "action": "type:operation",
+     "params": { ... },
+     "command_id": "optional-uuid"
+   }
+   ```
+   The server returns an immediate receipt:
+   ```json
+   {
+     "status": "received",
+     "command_id": "<uuid>"
+   }
+   ```
+2. **Execution (Worker)** – The server forwards the command over an internal framed channel to the worker. The worker processes it, updates state, and commits a new tick.
+3. **Receipt (SSE)** – The worker sends an acknowledgment back. The server forwards it as an SSE `command_ack` event:
+   ```json
+   event: command_ack
+   data: {
+     "command_id": "<uuid>",
+     "status": "ok" | "error",
+     "result": { ... },
+     "tick_id": <int>
+   }
+   ```
+
+### 7.3 Internal Frame Specifications
+Between the gateway and the worker, the protocol uses binary‑framed messages (header + JSON payload). The relevant frame types are:
+
+- `FRAME_COMMAND` (type 2, Gateway → Worker):
+  ```json
+  {
+    "command_id": "uuid",
+    "action": "type:operation",
+    "params": {"key": "value"},
+    "client_id": "client_123"
+  }
+  ```
+- `FRAME_COMMAND_ACK` (type 4, Worker → Gateway):
+  ```json
+  {
+    "command_id": "uuid",
+    "status": "ok" | "error",
+    "result": {"tick": 42, ...},
+    "tick_id": 42
+  }
+  ```
+
+### 7.4 Receipt Policies & Fault (Short) Semantics
+The receipt policy is defined per type via `ack_timeout_ms`:
+
+| `ack_timeout_ms` | Behaviour |
+| :--- | :--- |
+| `null` | No ack required; no SSE `command_ack` sent. The client only receives the HTTP receipt. |
+| `0` | Immediate fault if not acknowledged synchronously (within the same event‑loop tick). |
+| `> 0` | Wait for specified milliseconds; fault on timeout. |
+
+On timeout (when ack is required but not received):
+- The server invokes the registered `fault_handler` (if any), passing client_id and context.
+- The server sends an SSE `error` event with `fault: true` to the client.
+- The server closes the client’s SSE connection.
+
+### 7.5 Idempotency
+The Worker maintains a bounded LRU cache of processed `command_id`s. If a duplicate command arrives, the Worker re‑sends the previous acknowledgment without re‑executing the action. This prevents double mutations on retries.
+
+---
+
+## 8. Snapshot Chunking Protocol
 
 When a full snapshot exceeds 64 KB, it is split into ordered chunks to prevent network fragmentation and improve reliability.
 
@@ -265,15 +347,15 @@ When a full snapshot exceeds 64 KB, it is split into ordered chunks to prevent
 
 ---
 
-## **8. Client Behavior**
+## 9. Client Behavior
 
-### **8.1 Version Tracking**
+### 9.1 Version Tracking
 Client maintains:
 
-- `localVersions[type]` — last applied version  
-- `manifestVersions[type]` — server-reported version  
+- `localVersions[type]` — last applied version
+- `manifestVersions[type]` — server-reported version
 
-### **8.2 Stale Delta Rejection**
+### 9.2 Stale Delta Rejection
 Client rejects:
 
 ```
@@ -282,85 +364,92 @@ delta.version <= localVersions[type]
 
 Except for full snapshots.
 
-### **8.3 Full Snapshot Handling**
+### 9.3 Full Snapshot Handling
 Full snapshots overwrite local state for that type.
 
-### **8.4 Schema Version Handling**
+### 9.4 Schema Version Handling
 If schema version changes:
 
-- Client triggers `onSchemaMismatch`  
-- Application decides how to recover  
+- Client triggers `onSchemaMismatch`
+- Application decides how to recover
 
-### **8.5 Type Pruning**
+### 9.5 Type Pruning
 If server removes a type:
 
-- Client deletes store[type]  
-- Client deletes localVersions[type]  
+- Client deletes store[type]
+- Client deletes localVersions[type]
 - Client deletes manifestVersions[type]
 
-### **8.6 Reconnection Logic**
+### 9.6 Reconnection Logic
 Client reconnects automatically with:
 
-- Guarded reconnection  
-- Debounced retry  
-- Preservation of localVersions  
+- Guarded reconnection
+- Debounced retry
+- Preservation of localVersions
+- Same `client_id` (to maintain command routing)
 
 ---
 
-## **9. Error Handling**
+## 10. Error Handling
 
-### **9.1 Provider Errors**
+### 10.1 Provider Errors
 Raise `ProviderValidationError`.  
-Dirty type is re-marked for retry.
+Dirty type is re‑marked for retry.
 
-### **9.2 Transport Errors**
+### 10.2 Transport Errors
 Client triggers:
 
-- `onError` callback  
-- Reconnection cycle  
+- `onError` callback
+- Reconnection cycle
 
-### **9.3 Schema Mismatch**
+### 10.3 Schema Mismatch
 Client triggers:
 
-- `onSchemaMismatch` callback  
+- `onSchemaMismatch` callback
+
+### 10.4 Command Timeout (Fault)
+Server triggers:
+
+- Fault handler (application‑defined)
+- SSE `error` event with `fault: true`
+- Connection closure
 
 ---
 
-## **10. Guarantees**
+## 11. Guarantees
 
-### **10.1 Convergence**
+### 11.1 Convergence
 Any compliant client will converge to server state.
 
-### **10.2 Deterministic Deltas**
+### 11.2 Deterministic Deltas
 Lifecycle FSM ensures deterministic incremental updates.
 
-### **10.3 No Race Conditions**
+### 11.3 No Race Conditions
 Locking model ensures atomicity.
 
-### **10.4 No Ghost Entities**
+### 11.4 No Ghost Entities
 Type pruning prevents stale state.
 
-### **10.5 No Duplicate Streams**
+### 11.5 No Duplicate Streams
 Client reconnection guards prevent multiple EventSources.
+
+### 11.6 Command Idempotency
+Worker deduplication prevents double execution on retries.
 
 ---
 
-## **11. Non‑Goals**
+## 12. Non‑Goals
 
 StateSync does **not** provide:
 
-- Bidirectional communication  
-- Conflict resolution  
-- CRDT semantics  
-- Partial entity updates  
-- Compression or chunking  
-- Authentication or authorization  
-
-These must be implemented externally.
+- Conflict resolution
+- CRDT semantics
+- Partial entity updates
+- Authentication or authorization (these must be implemented externally)
 
 ---
 
-## **12. Versioning of the Protocol**
+## 13. Versioning of the Protocol
 
 This specification describes:
 
@@ -368,5 +457,4 @@ This specification describes:
 StateSync Protocol v1.1
 ```
 
-Schema versioning is independent and application‑defined.
-
+Schema versioning is independent and application‑defined. The bidirectional command/ack extensions are part of this version.
