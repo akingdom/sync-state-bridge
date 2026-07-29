@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Worker – full game with correct deletion: get_deltas() sends deletes before filtering.
+Worker – final with auto‑add for missing PIDs, robust command loop.
 """
 import asyncio
 import json
@@ -12,9 +12,7 @@ import traceback
 import struct
 from typing import Dict, List, Tuple, Optional
 
-# ----------------------------------------------------------------------
-# Framing constants (MVP)
-# ----------------------------------------------------------------------
+# Framing constants
 MAGIC = b"SSB1"
 VERSION = 0x01
 FRAME_HEADER_SIZE = 12
@@ -46,7 +44,7 @@ async def read_frame(reader: asyncio.StreamReader):
 print("[Worker] Starting up...", file=sys.stderr)
 
 # ----------------------------------------------------------------------
-# Game constants (unchanged)
+# Game constants
 # ----------------------------------------------------------------------
 W, H = 1000, 800
 PARTICLE_COUNT = 300
@@ -67,7 +65,7 @@ ASTEROID_SPAWN_INTERVAL = 2.0
 SLOW_ASTEROID_TIMEOUT = 10.0
 
 # ----------------------------------------------------------------------
-# Helpers (unchanged)
+# Helpers
 # ----------------------------------------------------------------------
 def dist(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
@@ -90,7 +88,7 @@ def radius_from_area(area):
     return math.sqrt(area / math.pi)
 
 # ----------------------------------------------------------------------
-# Entities (unchanged)
+# Entities (full – unchanged)
 # ----------------------------------------------------------------------
 class Asteroid:
     _next_id = 0
@@ -105,6 +103,7 @@ class Asteroid:
         self.alive = True
         self.spawn_time = time.time()
         self.type = "asteroid"
+        self.deleted_tick = None
 
     def update(self):
         if not self.alive:
@@ -162,8 +161,10 @@ class SwarmParticle:
         self.color = color if color is not None else f"hsl({random.randint(0, 360)}, 80%, 60%)"
         self.radius = 2
         self.type = "particle"
+        self.alive = True
+        self.deleted_tick = None
 
-    def update(self, asteroids: List[Asteroid], players: List['Player'], aggression: float):
+    def update(self, asteroids, players, aggression):
         for a in asteroids:
             if not a.alive:
                 continue
@@ -225,8 +226,9 @@ class Player:
         self.alive = True
         self.respawn_timer = 0
         self.type = "player"
+        self.deleted_tick = None
 
-    def update(self, keys: Dict[str, bool]):
+    def update(self, keys):
         if not self.alive:
             return
         thrust = 0
@@ -317,7 +319,7 @@ class Bullet:
 
 
 # ----------------------------------------------------------------------
-# GameState – correct deletion: get_deltas() filters after sending deletes
+# GameState – with auto‑add for missing PIDs
 # ----------------------------------------------------------------------
 class GameState:
     def __init__(self):
@@ -331,6 +333,41 @@ class GameState:
         self.player_keys: Dict[int, Dict[str, bool]] = {}
         self.next_particle_id = PARTICLE_COUNT
         self.spawn_timer = 0
+
+        # Version counters for asteroids/players only
+        self.versions = {
+            "asteroid": 0,
+            "player": 0,
+        }
+
+        # Deferred deletions for asteroids and players
+        self.deferred_deletions: List[Tuple[object, int]] = []
+        self.min_versions: Dict[str, int] = {}
+
+    def mark_for_deletion(self, entity):
+        if entity.type in ("asteroid", "player"):
+            entity.alive = False
+            entity.deleted_tick = self.tick
+            self.deferred_deletions.append((entity, self.tick))
+        else:
+            entity.alive = False
+
+    def collect_garbage(self):
+        if not self.deferred_deletions:
+            return
+        to_remove = set()
+        for entity, del_tick in self.deferred_deletions:
+            type_name = entity.type
+            if self.min_versions.get(type_name, 0) >= del_tick:
+                to_remove.add(entity)
+        if not to_remove:
+            return
+        self.asteroids = [a for a in self.asteroids if a not in to_remove]
+        self.players = [p for p in self.players if p not in to_remove]
+        self.deferred_deletions = [
+            (e, t) for e, t in self.deferred_deletions
+            if e not in to_remove
+        ]
 
     def add_player(self, pid: int):
         if pid >= MAX_PLAYERS:
@@ -356,19 +393,30 @@ class GameState:
         return True
 
     def set_keys(self, pid: int, keys: Dict[str, bool]):
-        if pid in self.player_keys:
-            self.player_keys[pid] = keys
+        # Auto-add player if missing
+        if pid not in self.player_keys:
+            print(f"[Worker] Auto-adding player {pid} (missing in set_keys)")
+            self.add_player(pid)
+        self.player_keys[pid] = keys
+        print(f"[Worker] set_keys: pid={pid}, keys={keys}")
 
     def fire(self, pid: int):
+        # Auto-add player if missing
+        if pid not in self.player_keys:
+            print(f"[Worker] Auto-adding player {pid} (missing in fire)")
+            self.add_player(pid)
         for p in self.players:
             if p.pid == pid:
                 p.fire(self)
+                print(f"[Worker] Player {pid} fired a bullet")
                 break
 
+    # ------------------------------------------------------------------
+    # Full update() logic
+    # ------------------------------------------------------------------
     def update(self):
         self.tick += 1
 
-        # Update all entities
         for a in self.asteroids:
             a.update()
         for p in self.particles:
@@ -396,12 +444,11 @@ class GameState:
         for b in self.bullets:
             b.update()
 
-        # Remove very slow asteroids (fallback)
+        # Remove very slow asteroids
         for a in self.asteroids:
             if a.alive and time.time() - a.spawn_time > SLOW_ASTEROID_TIMEOUT and math.hypot(a.vx, a.vy) < 0.1:
-                a.alive = False
+                self.mark_for_deletion(a)
 
-        # Helper to spawn particles
         def spawn_particles(x, y, count=2):
             for _ in range(count):
                 p = SwarmParticle(
@@ -427,8 +474,8 @@ class GameState:
                     continue
                 if dist((a1.x, a1.y), (a2.x, a2.y)) < (a1.radius + a2.radius):
                     if a1.radius < ASTEROID_MIN_RADIUS * 2 and a2.radius < ASTEROID_MIN_RADIUS * 2:
-                        a1.alive = False
-                        a2.alive = False
+                        self.mark_for_deletion(a1)
+                        self.mark_for_deletion(a2)
                         spawn_particles(a1.x, a1.y)
                         spawn_particles(a2.x, a2.y)
                     else:
@@ -446,7 +493,7 @@ class GameState:
                     if a.radius >= ASTEROID_MIN_RADIUS * 2:
                         new_asteroids.extend(a.split())
                     else:
-                        a.alive = False
+                        self.mark_for_deletion(a)
                         spawn_particles(a.x, a.y)
                     b.alive = False
                     break
@@ -459,16 +506,19 @@ class GameState:
                 if not p.alive:
                     continue
                 if dist((a.x, a.y), (p.x, p.y)) < (a.radius + p.collision_radius):
-                    p.alive = False
-                    p.respawn_timer = 0
+                    self.mark_for_deletion(p)
                     print(f"[Worker] Player {p.pid} killed by asteroid")
                     break
 
-        # Add new asteroids
         self.asteroids.extend(new_asteroids)
 
-        # ---- DO NOT REMOVE DEAD ENTITIES HERE ----
-        # They will be removed in get_deltas() after sending delete messages.
+        # Catch any entities that became dead but not marked
+        for a in self.asteroids:
+            if not a.alive and not any(e is a for e, _ in self.deferred_deletions):
+                self.mark_for_deletion(a)
+        for p in self.players:
+            if not p.alive and not any(e is p for e, _ in self.deferred_deletions):
+                self.mark_for_deletion(p)
 
         # Cap particles
         if len(self.particles) > MAX_PARTICLES:
@@ -476,11 +526,12 @@ class GameState:
             del self.particles[:excess]
 
         # Spawn new asteroids if needed
-        if len(self.asteroids) < MIN_ASTEROIDS:
+        alive_asteroids = [a for a in self.asteroids if a.alive]
+        if len(alive_asteroids) < MIN_ASTEROIDS:
             self.spawn_timer += TICK
             if self.spawn_timer > ASTEROID_SPAWN_INTERVAL:
                 self.spawn_timer = 0
-                to_spawn = min(MAX_ASTEROIDS - len(self.asteroids), random.randint(1, 2))
+                to_spawn = min(MAX_ASTEROIDS - len(alive_asteroids), random.randint(1, 2))
                 for _ in range(to_spawn):
                     side = random.choice(['top', 'bottom', 'left', 'right'])
                     if side == 'top':
@@ -507,49 +558,50 @@ class GameState:
 
         self.aggression = max(0, self.aggression - 0.001)
 
+        # Increment versions
+        for t in self.versions.keys():
+            self.versions[t] += 1
+
+        self.collect_garbage()
+
     # ------------------------------------------------------------------
-    # get_deltas() – sends delete for dead entities, THEN removes them
+    # get_deltas()
     # ------------------------------------------------------------------
     def get_deltas(self):
         deltas = []
 
-        # Particles: always update
+        # Particles
         for p in self.particles:
             deltas.append({"id": p.id, "op": "update", "type": p.type, "changes": p.to_dict()})
 
-        # Asteroids: send delete if dead, update if alive
-        dead_asteroids = []
+        # Asteroids
         for a in self.asteroids:
             if a.alive:
                 deltas.append({"id": a.id, "op": "update", "type": a.type, "changes": a.to_dict()})
             else:
-                dead_asteroids.append(a.id)
                 deltas.append({"id": a.id, "op": "delete", "type": a.type})
-        if dead_asteroids:
-            print(f"[Worker] Deleting asteroids: {dead_asteroids}")
-        # Remove dead asteroids
-        self.asteroids = [a for a in self.asteroids if a.alive]
 
-        # Players: delete if dead, update if alive
+        # Players
         for p in self.players:
             if p.alive:
                 deltas.append({"id": p.id, "op": "update", "type": p.type, "changes": p.to_dict()})
             else:
                 deltas.append({"id": p.id, "op": "delete", "type": p.type})
 
-        # Bullets: delete if dead, update if alive
-        dead_bullets = []
+        # Bullets
         for b in self.bullets:
             if b.alive:
                 deltas.append({"id": b.id, "op": "update", "type": b.type, "changes": b.to_dict()})
             else:
-                dead_bullets.append(b.id)
                 deltas.append({"id": b.id, "op": "delete", "type": b.type})
-        if dead_bullets:
-            print(f"[Worker] Deleting bullets: {dead_bullets}")
         self.bullets = [b for b in self.bullets if b.alive]
 
-        return deltas
+        return {
+            "type": "DELTA",
+            "tick": self.tick,
+            "versions": self.versions.copy(),
+            "deltas": deltas
+        }
 
 
 # ----------------------------------------------------------------------
@@ -570,6 +622,13 @@ async def connect_to_gateway(host='127.0.0.1', port=8766, max_attempts=20):
 async def send_delta(writer, payload: dict):
     json_bytes = json.dumps(payload).encode('utf-8')
     header = pack_header(FRAME_DELTA, len(json_bytes), 0)
+    writer.write(header + json_bytes)
+    await writer.drain()
+
+async def send_command(writer, action: str, params: dict):
+    cmd = {"action": action, "params": params}
+    json_bytes = json.dumps(cmd).encode('utf-8')
+    header = pack_header(FRAME_COMMAND, len(json_bytes), 0)
     writer.write(header + json_bytes)
     await writer.drain()
 
@@ -599,8 +658,8 @@ async def main():
                         continue
                     try:
                         cmd = json.loads(line)
-                    except json.JSONDecodeError as e:
-                        print(f"[Worker] Invalid JSON: {e}")
+                    except json.JSONDecodeError:
+                        print(f"[Worker] Invalid JSON: {line[:100]}", file=sys.stderr)
                         continue
                     action = cmd.get("action")
                     params = cmd.get("params", {})
@@ -621,7 +680,6 @@ async def main():
                         for lst in (game.particles, game.asteroids, game.players, game.bullets):
                             for e in lst:
                                 e.alive = False
-                        # Force send deletes and reinit
                         game.get_deltas()
                         game.__init__()
                         print("[Worker] Reset complete")
@@ -634,26 +692,26 @@ async def main():
                     elif action == "clear":
                         game.particles = []
                     elif action == "ping":
-                        # ignore
                         pass
+                    elif action == "min_versions_response":
+                        game.min_versions = params.get("versions", {})
+                    else:
+                        print(f"[Worker] Unknown command: {action}", file=sys.stderr)
                 # ignore other frame types
             except Exception as e:
-                print(f"[Worker] Command loop error: {e}", file=sys.stderr)
+                print(f"[Worker] Command loop error (continuing): {e}", file=sys.stderr)
                 traceback.print_exc()
-                break
+                # Do NOT break – continue
 
     asyncio.create_task(read_commands())
 
     try:
         while True:
             start = time.time()
+            if game.tick % 60 == 0:
+                await send_command(writer, "get_min_versions", {})
             game.update()
-            deltas = game.get_deltas()
-            payload = {
-                "type": "DELTA",
-                "tick": game.tick,
-                "deltas": deltas
-            }
+            payload = game.get_deltas()
             await send_delta(writer, payload)
             elapsed = time.time() - start
             if elapsed < TICK:

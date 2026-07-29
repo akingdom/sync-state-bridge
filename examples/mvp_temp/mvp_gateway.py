@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Gateway – with framed commands.
+Gateway – robust SSE stream, resilient command forwarding.
 """
 import asyncio
 import json
 import sys
 import struct
 import socket
-from fastapi import FastAPI, Request, HTTPException
+import logging
+from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from sync_state import DeltaRingBuffer
 from sync_state.js import get_client_js_content
 
+# Framing constants
 MAGIC = b"SSB1"
 VERSION = 0x01
 FRAME_HEADER_SIZE = 12
@@ -49,11 +51,17 @@ ring = DeltaRingBuffer(capacity=500)
 current_state = {}
 client_queues = set()
 worker_writer = None
-write_lock = asyncio.Lock()
+write_lock = None
+
+# Track client versions
+client_last_versions = {}
+client_queue_map = {}
 
 async def forward_to_worker(action: str, params: dict = None):
-    global worker_writer
-    if not worker_writer:
+    global worker_writer, write_lock
+    if write_lock is None:
+        raise RuntimeError("Lock not initialised")
+    if worker_writer is None:
         print("[Gateway] Worker not connected", file=sys.stderr)
         return False
     cmd = {"action": action, "params": params or {}}
@@ -64,36 +72,15 @@ async def forward_to_worker(action: str, params: dict = None):
         try:
             worker_writer.write(frame)
             await worker_writer.drain()
-            await asyncio.sleep(0)
             print(f"[Gateway] Sent command: {action} {params}")
             return True
         except Exception as e:
             print(f"[Gateway] Error forwarding command: {e}", file=sys.stderr)
             return False
 
-async def ping_worker():
-    global worker_writer
-    while True:
-        await asyncio.sleep(2.0)
-        if worker_writer:
-            cmd = {"action": "ping", "params": {}}
-            json_bytes = json.dumps(cmd).encode('utf-8')
-            header = pack_header(FRAME_COMMAND, len(json_bytes), 0)
-            frame = header + json_bytes
-            async with write_lock:
-                try:
-                    worker_writer.write(frame)
-                    await worker_writer.drain()
-                except Exception as e:
-                    print(f"[Gateway] Ping error: {e}")
-
 async def ipc_server():
-    server = await asyncio.start_server(
-        handle_worker,
-        '127.0.0.1', 8766
-    )
+    server = await asyncio.start_server(handle_worker, '127.0.0.1', 8766)
     print("[Gateway] IPC server listening on 8766")
-    asyncio.create_task(ping_worker())
     async with server:
         await server.serve_forever()
 
@@ -114,11 +101,15 @@ async def handle_worker(reader, writer):
                 line = payload.decode('utf-8').strip()
                 if not line:
                     continue
-                frame = json.loads(line)
-                tick = frame.get("tick")
+                try:
+                    frame_data = json.loads(line)
+                except json.JSONDecodeError:
+                    print("[Gateway] Invalid delta JSON", file=sys.stderr)
+                    continue
+                tick = frame_data.get("tick")
                 if tick is not None:
                     ring.append(tick, line)
-                for d in frame.get("deltas", []):
+                for d in frame_data.get("deltas", []):
                     eid = d["id"]
                     op = d["op"]
                     t = d.get("type", "unknown")
@@ -129,12 +120,33 @@ async def handle_worker(reader, writer):
                     else:
                         entity = {"id": eid, **d.get("changes", {})}
                         current_state[t][eid] = entity
+                # Broadcast to all clients
                 for q in list(client_queues):
                     try:
                         q.put_nowait(line)
                     except asyncio.QueueFull:
-                        client_queues.remove(q)
-            # Ignore other frame types
+                        # Remove dead queue
+                        for cid, qq in list(client_queue_map.items()):
+                            if qq == q:
+                                del client_queue_map[cid]
+                                break
+            elif frame_type == FRAME_COMMAND:
+                cmd = json.loads(payload.decode())
+                action = cmd.get("action")
+                if action == "get_min_versions":
+                    min_versions = {}
+                    if client_last_versions:
+                        all_types = set()
+                        for v in client_last_versions.values():
+                            all_types.update(v.keys())
+                        for t in all_types:
+                            min_ver = min((v.get(t, 0) for v in client_last_versions.values()), default=0)
+                            min_versions[t] = min_ver
+                    response = {"action": "min_versions_response", "versions": min_versions}
+                    json_bytes = json.dumps(response).encode('utf-8')
+                    header = pack_header(FRAME_COMMAND, len(json_bytes), 0)
+                    writer.write(header + json_bytes)
+                    await writer.drain()
     except Exception as e:
         print(f"[Gateway] Worker error: {e}")
     finally:
@@ -143,20 +155,22 @@ async def handle_worker(reader, writer):
         await writer.wait_closed()
         print("[Gateway] Worker disconnected")
 
-# ----------------------------------------------------------------------
-# SSE endpoint
-# ----------------------------------------------------------------------
 @app.get("/stream")
-async def stream(request: Request):
+async def stream(request: Request, client_id: str = Query(...)):
     last_id = request.headers.get("Last-Event-ID")
     last_tick = int(last_id) if last_id and last_id.isdigit() else None
 
     q = asyncio.Queue(maxsize=100)
+    client_queue_map[client_id] = q
     client_queues.add(q)
+    client_last_versions[client_id] = {}
 
     async def event_generator():
         try:
+            # Send manifest
             yield f"event: manifest\ndata: {json.dumps({'schema_version':1})}\n\n"
+
+            # Send snapshot if needed
             if last_tick is None or ring.get_missed_deltas(last_tick) is None:
                 state_copy = current_state.copy()
                 all_entities = []
@@ -169,16 +183,49 @@ async def stream(request: Request):
                 if missed:
                     for m in missed:
                         yield f"event: delta\ndata: {m}\n\n"
+                        try:
+                            data = json.loads(m)
+                            versions = data.get("versions", {})
+                            for t, v in versions.items():
+                                client_last_versions[client_id][t] = v
+                        except:
+                            pass
+
+            # Main loop – robust exception handling
             while True:
                 try:
                     payload = await asyncio.wait_for(q.get(), timeout=15)
                     yield f"event: delta\ndata: {payload}\n\n"
+                    try:
+                        data = json.loads(payload)
+                        versions = data.get("versions", {})
+                        for t, v in versions.items():
+                            client_last_versions[client_id][t] = v
+                    except:
+                        pass
                 except asyncio.TimeoutError:
+                    # Send keepalive
                     yield "event: keepalive\ndata: {}\n\n"
+                except Exception as e:
+                    # Log but don't break – keep the stream alive
+                    print(f"[Gateway] Stream error (continuing): {e}", file=sys.stderr)
+                    yield "event: error\ndata: {}\n\n"
+        except Exception as e:
+            print(f"[Gateway] Fatal stream error: {e}", file=sys.stderr)
         finally:
             client_queues.discard(q)
+            client_queue_map.pop(client_id, None)
+            client_last_versions.pop(client_id, None)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        }
+    )
 
 # ----------------------------------------------------------------------
 # Command endpoints
@@ -224,9 +271,6 @@ async def clear():
         raise HTTPException(status_code=503, detail="Worker not connected")
     return {"ok": True}
 
-# ----------------------------------------------------------------------
-# Static & client JS
-# ----------------------------------------------------------------------
 @app.get("/client/stateClient.js")
 def serve_client_js():
     return HTMLResponse(content=get_client_js_content(), media_type="application/javascript")
@@ -238,12 +282,15 @@ async def index():
     with open("static/index.html") as f:
         return HTMLResponse(f.read())
 
+write_lock = None
+
 @app.on_event("startup")
 async def startup():
+    global write_lock
+    write_lock = asyncio.Lock()
     asyncio.create_task(ipc_server())
 
 if __name__ == "__main__":
     import uvicorn
     print("[Gateway] Launching uvicorn...", file=sys.stderr)
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    print("[Gateway] Shut down.", file=sys.stderr)

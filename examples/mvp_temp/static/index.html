@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-<!--regenerated-->
 <html>
 <head>
     <meta charset="UTF-8">
@@ -157,7 +156,10 @@
         lastTick = 0;
         joinedPlayers.clear();
 
-        eventSource = new EventSource('/stream?versions={}');
+        // Generate a unique client ID (gateway may ignore it)
+        const clientId = 'client_' + Math.random().toString(36).substring(2, 10);
+
+        eventSource = new EventSource(`/stream?versions={}&client_id=${clientId}`);
 
         eventSource.addEventListener('manifest', (e) => {
             console.log('Manifest:', e.data);
@@ -231,7 +233,7 @@
         eventSource.addEventListener('keepalive', () => {});
         eventSource.addEventListener('error', (e) => {
             console.error('EventSource error:', e);
-            setTimeout(connectToStream, 1000);
+            setTimeout(connectToStream, 100);
         });
     }
 
