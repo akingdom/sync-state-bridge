@@ -271,11 +271,7 @@
     function joinPlayer(pid) {
         if (!joinedPlayers.has(pid)) {
             joinedPlayers.add(pid);
-            fetch('/command?client_id=' + clientId, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'game:join', params: { pid } })
-            });
+            fetch('/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid }) });
             console.log(`Auto-join player ${pid}`);
         }
     }
@@ -289,11 +285,7 @@
         joinPlayer(pid);
         const k = mapping.key;
         if (k === 'fire') {
-            fetch('/command?client_id=' + clientId, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'game:fire', params: { pid } })
-            });
+            fetch('/fire', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid }) });
             return;
         }
         if (!keysDown[pid]) keysDown[pid] = {};
@@ -316,10 +308,18 @@
 
     function sendMove(pid) {
         const kd = keysDown[pid] || {};
-                fetch('/command?client_id=' + clientId, {
+        fetch('/move', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'game:move', params: { pid, keys } })
+            body: JSON.stringify({
+                pid,
+                keys: {
+                    up: !!kd.up,
+                    down: !!kd.down,
+                    left: !!kd.left,
+                    right: !!kd.right,
+                }
+            })
         });
     }
 
@@ -331,11 +331,7 @@
             entities.bullet = [];
             lastTick = 0;
             joinedPlayers.clear();
-            fetch('/command?client_id=' + clientId, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'game:reset', params: {} })
-            });
+            fetch('/reset', { method: 'POST' });
             setTimeout(connectToStream, 100);
         }
     };
