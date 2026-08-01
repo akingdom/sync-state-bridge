@@ -19,7 +19,6 @@ export class StateClient {
             onManifest: null,
             onError: null,
             onSchemaMismatch: null,
-            onCommandAck: null,
         };
     }
 
@@ -67,56 +66,11 @@ export class StateClient {
             }
         });
 
-        // New: command_ack
-        es.addEventListener('command_ack', (e) => {
-            try {
-                const ack = JSON.parse(e.data);
-                if (this.callbacks.onCommandAck) {
-                    this.callbacks.onCommandAck(ack);
-                }
-            } catch (err) {
-                console.error('[StateClient] Command ack parse error:', err);
-            }
-        });
-
         es.addEventListener('error', (e) => {
-            // SSE error may contain fault data
-            if (e.data) {
-                try {
-                    const errData = JSON.parse(e.data);
-                    if (errData.fault) {
-                        console.error('[StateClient] Fault detected:', errData);
-                        if (this.callbacks.onError) {
-                            this.callbacks.onError({ fault: true, ...errData });
-                        }
-                        this.disconnect();
-                        return;
-                    }
-                } catch (_) {}
-            }
-            // Otherwise treat as normal disconnect
             this._handleDisconnect(e);
         });
 
         es.addEventListener('keepalive', () => {});
-    }
-
-    // New: send command
-    async sendCommand(action, params, commandId = null) {
-        if (!commandId) {
-            commandId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36);
-        }
-        const url = `${this.url}/command?client_id=${this.clientId}`;
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command_id: commandId, action, params })
-        });
-        if (!response.ok) {
-            const err = await response.text();
-            throw new Error(`Command failed: ${response.status} - ${err}`);
-        }
-        return await response.json();  // immediate receipt
     }
 
     disconnect() {
@@ -152,7 +106,7 @@ export class StateClient {
             if (this.schemaVersion === null) {
                 this.schemaVersion = manifest.schema_version;
             } else if (this.schemaVersion !== manifest.schema_version) {
-                console.warn('[StateClient] Schema version mismatch detected.');
+                console.warn('[StateClient] Schema version mismatch.');
                 if (this.callbacks.onSchemaMismatch) {
                     this.callbacks.onSchemaMismatch(manifest.schema_version, this.schemaVersion);
                 }

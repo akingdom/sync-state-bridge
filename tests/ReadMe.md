@@ -19,3 +19,7 @@ pytest tests/
 The tests are also run automatically in the GitHub Actions CI pipeline (`.github/workflows/ci.yml`), so any pull request must pass them.
 
 If you haven't yet, you can add the `tests/` folder using the update script provided earlier. The script creates `tests/test_sync.py` with the tests above.
+
+
+## alternative debugging of tests
+python -X faulthandler -m pytest -o faulthandler_timeout=5 .

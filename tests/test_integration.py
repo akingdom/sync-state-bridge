@@ -1,75 +1,82 @@
+# filename: tests/test_integration.py
+
 import asyncio
-import json
+import threading
+import time
 import pytest
 from fastapi.testclient import TestClient
-from sync_state.transports.http_link import HTTPLink
-from sync_state.router import Router, RouterEntry
-from sync_state.qos import TypeMetadata, SyncDirection
+from sync_state.core.sync_bridge import SyncStateBridge
+from sync_state.core.ipc_transport import IPCTransport
+from sync_state.web.http_sse_transport import HTTPSSETransport
 
 
-class MockWorker:
-    def __init__(self, worker_queue):
-        self.worker_queue = worker_queue
-        self.responses = []
+@pytest.fixture
+async def full_system():
+    bridge = SyncStateBridge(kernel_capacity=100)
+    ipc = IPCTransport(listen_on="127.0.0.1:8767")
+    http = HTTPSSETransport(host="127.0.0.1", port=0, static_dir=None)
 
-    async def run(self, router):
-        while True:
-            frame = await self.worker_queue.get()
-            data = json.loads(frame)
-            command_id = data["command_id"]
-            ack = {
-                "command_id": command_id,
-                "status": "ok",
-                "result": {"tick": 42},
-                "tick_id": 42
-            }
-            self.responses.append(ack)
-            # Send ack back via router
-            await router.resolve_ack(json.dumps(ack).encode())
+    qos_map = {"player": 3, "particle": 1, "controls": 2}
+
+    bridge.register_transport(ipc, ["player", "particle"], direction="in")
+    bridge.register_transport(ipc, ["controls"], direction="out", qos_map=qos_map)
+    bridge.register_transport(http, ["controls"], direction="in")
+    bridge.register_transport(http, ["player", "particle"], direction="out", qos_map=qos_map)
+
+    bridge.start()
+    await ipc.start()
+
+    async def stats_endpoint():
+        return {"governor": bridge.governor.evaluate(current_queue_depth=0)}
+
+    http.add_route("/stats", stats_endpoint)
+    http.finalize()
+
+    http.start()
+
+    timeout = 5.0
+    start_time = time.time()
+    while not http._running and time.time() - start_time < timeout:
+        await asyncio.sleep(0.01)
+
+    http.on_frame(lambda frame: bridge.submit(frame, http))
+    ipc.on_frame(lambda frame: bridge.submit(frame, ipc))
+
+    yield bridge, ipc, http
+
+    # Cleanup sequence
+    http.stop()
+    await ipc.close()
+    bridge.close()
 
 
 @pytest.mark.asyncio
-async def test_integration_command_flow():
-    worker_queue = asyncio.Queue()
-    metadata = TypeMetadata(
-        type_name="robot",
-        direction=SyncDirection.BIDIRECTIONAL,
-        ack_timeout_ms=500
-    )
-    entry = RouterEntry(worker_queue=worker_queue, metadata=metadata)
-    router = Router(type_config={"robot": entry})
+async def test_full_pipeline_frame_flow(full_system):
+    bridge, ipc, http = full_system
 
-    worker = MockWorker(worker_queue)
-    worker_task = asyncio.create_task(worker.run(router))
+    client_queue = asyncio.Queue()
+    http._out_queues.add(client_queue)
 
-    link = HTTPLink(router, host="127.0.0.1", port=0)
-    client = TestClient(link.app)
+    with TestClient(http._app) as test_client:
+        payload = {"type": "controls", "id": "player_0", "data": {"up": True}}
+        response = test_client.post("/update", json=payload)
+        assert response.status_code == 200
 
-    payload = {
-        "action": "robot:move",
-        "params": {"x": 5},
-        "command_id": "cmd-integration"
-    }
-    response = client.post("/command?client_id=client-integration", json=payload)
-    assert response.status_code == 200
-    receipt = response.json()
-    assert receipt["status"] == "received"
-    assert receipt["command_id"] == "cmd-integration"
+    worker_frame = {"type": "player", "id": "player_0", "pos": [100, 200]}
+    bridge.submit(worker_frame, source_transport=None)
 
-    # Wait for worker to process and send ack
-    await asyncio.sleep(0.1)
+    delivered = await asyncio.wait_for(client_queue.get(), timeout=1.0)
+    assert delivered["type"] == "player"
+    assert delivered["pos"] == [100, 200]
 
-    # Check that ack was forwarded to client queue
-    queue = router.client_queues.get("client-integration")
-    assert queue is not None
-    event = await asyncio.wait_for(queue.get(), timeout=0.5)
-    assert event["event"] == "command_ack"
-    ack_received = json.loads(event["data"])
-    assert ack_received["status"] == "ok"
-    assert ack_received["result"]["tick"] == 42
 
-    worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
+@pytest.mark.asyncio
+async def test_governor_stats_endpoint(full_system):
+    _, _, http = full_system
+
+    with TestClient(http._app) as client:
+        response = client.get("/stats")
+        assert response.status_code == 200
+        data = response.json()
+        assert "governor" in data
+        assert "health" in data["governor"]

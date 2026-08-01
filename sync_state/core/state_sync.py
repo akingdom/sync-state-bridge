@@ -5,7 +5,7 @@ import copy
 import time
 from collections import defaultdict, deque
 from typing import Dict, List, Any, Callable, Optional, Set, AsyncIterator
-from .qos import QoS, DropPolicy, TypeMetadata   # if you have these
+from ..reliability.qos import QoS, DropPolicy, TypeMetadata   # if you have these
 
 
 def canonical_hash(entity: Dict[str, Any]) -> str:
@@ -61,7 +61,6 @@ class StateSync:
         qos: Optional[QoS] = None,
         max_frame_bytes: int = 1_048_576
     ):
-        from .qos import QoS, TypeMetadata  # ensure import is available
         qos_obj = qos or QoS()
         self._snapshot_providers[type_name] = provider
         self._type_metadata[type_name] = TypeMetadata(
@@ -156,6 +155,23 @@ class StateSync:
             for evt in self._stream_events:
                 evt.set()
 
+    def get_last_delta(self, type_name: str) -> Optional[Dict[str, Any]]:
+        if type_name not in self._change_logs:
+            return None
+        history = self._change_logs[type_name]
+        if not history:
+            return None
+        last_entry = history[-1]
+        snapshot = self._current_snapshots.get(type_name, {})
+        return {
+            "type": type_name,
+            "full": False,
+            "version": last_entry["version"],
+            "added": [snapshot[eid] for eid in last_entry["added"] if eid in snapshot],
+            "updated": [snapshot[eid] for eid in last_entry["updated"] if eid in snapshot],
+            "deleted": last_entry["deleted"],
+        }
+            
     def get_delta(self, type_name: str, client_version: int) -> Dict[str, Any]:
         snapshot = self._current_snapshots.get(type_name, {})
         history = self._change_logs.get(type_name)

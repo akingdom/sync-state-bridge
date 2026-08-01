@@ -1,186 +1,88 @@
-import asyncio
-import json
 import pytest
-from sync_state.router import Router, RouterEntry
-from sync_state.qos import TypeMetadata, SyncDirection, QoS
+from sync_state.core.router import Router, RouterConfigError, RouterUnauthorizedError
 
 
-class MockWorkerQueue:
+class DummyTransport:
     def __init__(self):
-        self.queue = asyncio.Queue()
+        self.emitted = []
 
-    async def put(self, item):
-        await self.queue.put(item)
+    def emit(self, frame):
+        self.emitted.append(frame)
 
-    async def get(self):
-        return await self.queue.get()
+def dummy_conflict_policy(type_name, frames_by_source):
+    return next(iter(frames_by_source.values()))
 
+def test_router_single_authority():
+    router = Router()
+    t1 = DummyTransport()
+    t2 = DummyTransport()
 
-@pytest.fixture
-def router_and_worker():
-    """Return a router with a single type 'robot', and the worker queue."""
-    worker_q = MockWorkerQueue()
-    metadata = TypeMetadata(
-        type_name="robot",
-        direction=SyncDirection.BIDIRECTIONAL,
-        ack_timeout_ms=100,
-        fault_handler=None
-    )
-    entry = RouterEntry(worker_queue=worker_q, metadata=metadata)
-    router = Router(type_config={"robot": entry})
-    return router, worker_q
+    router.register_transport(t1, ["player"], "in")
+    router.register_transport(t2, ["player"], "out")
+
+    frame = {"type": "player", "id": "p1"}
+    targets = router.route(frame, t1)
+    assert targets == [t2]
 
 
-@pytest.fixture
-def router_readonly():
-    """Router with a read‑only type."""
-    worker_q = MockWorkerQueue()
-    metadata = TypeMetadata(
-        type_name="sensor",
-        direction=SyncDirection.UNIDIRECTIONAL,
-        ack_timeout_ms=None
-    )
-    entry = RouterEntry(worker_queue=worker_q, metadata=metadata)
-    router = Router(type_config={"sensor": entry})
-    return router, worker_q
+def test_router_denies_unauthorized_source():
+    router = Router()
+    t1 = DummyTransport()
+    t2 = DummyTransport()
+
+    router.register_transport(t1, ["player"], "out")
+    router.register_transport(t2, ["player"], "in")
+
+    frame = {"type": "player", "id": "p1"}
+    with pytest.raises(RouterUnauthorizedError):
+        router.route(frame, t1)
 
 
-@pytest.mark.asyncio
-async def test_router_routes_to_correct_worker(router_and_worker):
-    router, worker_q = router_and_worker
-    client_id = "client-123"
-    frame = json.dumps({
-        "action": "robot:move",
-        "params": {"x": 5},
-        "command_id": "cmd-1"
-    }).encode() + b"\n"
-
-    receipt = await router.handle_frame_from_http(client_id, frame)
-    assert receipt["status"] == "received"
-    assert receipt["command_id"] == "cmd-1"
-
-    # Worker should receive the frame with injected client_id
-    received = await worker_q.get()
-    received_data = json.loads(received)
-    assert received_data["action"] == "robot:move"
-    assert received_data["params"]["x"] == 5
-    assert received_data["command_id"] == "cmd-1"
-    assert received_data["client_id"] == "client-123"
+def test_router_requires_type():
+    router = Router()
+    t1 = DummyTransport()
+    frame = {"id": "p1"}
+    with pytest.raises(ValueError, match="missing 'type'"):
+        router.route(frame, t1)
 
 
-@pytest.mark.asyncio
-async def test_router_rejects_readonly(router_readonly):
-    router, _ = router_readonly
-    client_id = "client-123"
-    frame = json.dumps({
-        "action": "sensor:read",
-        "params": {},
-        "command_id": "cmd-2"
-    }).encode() + b"\n"
+def test_router_multiple_sources_allowed():
+    router = Router()
+    t1 = DummyTransport()
+    t2 = DummyTransport()
 
-    with pytest.raises(PermissionError, match="read‑only"):
-        await router.handle_frame_from_http(client_id, frame)
+    # Pass dummy conflict_policy if multi-source requires it
+    router.register_transport(t1, ["player"], "in", allow_multiple_sources=True, conflict_policy=lambda x: x)
+    router.register_transport(t2, ["player"], "in", allow_multiple_sources=True, conflict_policy=lambda x: x)
 
 
-@pytest.mark.asyncio
-async def test_router_timeout_triggers_fault(router_and_worker):
-    router, _ = router_and_worker
-    fault_triggered = False
+def test_router_multiple_sources_requires_conflict_policy():
+    router = Router()
+    t1 = DummyTransport()
+    t2 = DummyTransport()
 
-    def fault_handler(client_id, context):
-        nonlocal fault_triggered
-        fault_triggered = True
-        assert client_id == "client-456"
-        assert context["command_id"] == "cmd-3"
-
-    entry = router.type_config["robot"]
-    entry.metadata.fault_handler = fault_handler
-    entry.metadata.ack_timeout_ms = 50
-
-    client_id = "client-456"
-    frame = json.dumps({
-        "action": "robot:move",
-        "params": {"x": 1},
-        "command_id": "cmd-3"
-    }).encode() + b"\n"
-
-    # Ensure client queue exists
-    router.get_client_queue(client_id)
-
-    receipt = await router.handle_frame_from_http(client_id, frame)
-    assert receipt["status"] == "received"
-
-    # Wait for timeout (50ms + margin)
-    await asyncio.sleep(0.15)
-
-    assert fault_triggered is True
-
-    # Check that error event was put into client queue
-    queue = router.client_queues[client_id]
-    event = await asyncio.wait_for(queue.get(), timeout=0.5)
-    assert event["event"] == "error"
-    error_data = json.loads(event["data"])
-    assert error_data["fault"] is True
-    assert error_data["command_id"] == "cmd-3"
+    router.register_transport(t1, ["player"], "in", allow_multiple_sources=True)
+    
+    # Registering a second inbound source without providing a conflict_policy should raise
+    with pytest.raises(RouterConfigError, match="conflict_policy"):
+        router.register_transport(t2, ["player"], "in", allow_multiple_sources=True)
 
 
-@pytest.mark.asyncio
-async def test_router_resolves_ack_and_forwards(router_and_worker):
-    router, worker_q = router_and_worker
-    client_id = "client-789"
-    router.get_client_queue(client_id)
-
-    frame = json.dumps({
-        "action": "robot:move",
-        "params": {"x": 2},
-        "command_id": "cmd-4"
-    }).encode() + b"\n"
-
-    receipt = await router.handle_frame_from_http(client_id, frame)
-    assert receipt["command_id"] == "cmd-4"
-
-    # Simulate worker sending ack
-    ack_payload = json.dumps({
-        "command_id": "cmd-4",
-        "status": "ok",
-        "result": {"tick": 123},
-        "tick_id": 123
-    }).encode()
-
-    await router.resolve_ack(ack_payload)
-
-    queue = router.client_queues[client_id]
-    event = await asyncio.wait_for(queue.get(), timeout=0.5)
-    assert event["event"] == "command_ack"
-    data = json.loads(event["data"])
-    assert data["command_id"] == "cmd-4"
-    assert data["status"] == "ok"
-    assert data["result"]["tick"] == 123
-
-    assert "cmd-4" not in router.pending_futures
-    assert "cmd-4" not in router.pending_client
+def test_router_returns_empty_for_no_routes():
+    router = Router()
+    t1 = DummyTransport()
+    frame = {"type": "unknown", "id": "x"}
+    targets = router.route(frame, t1)
+    assert targets == []
 
 
-@pytest.mark.asyncio
-async def test_router_idempotency(router_and_worker):
-    # Router is stateless; idempotency is on worker side.
-    # We test that router forwards duplicates without interference.
-    router, worker_q = router_and_worker
-    client_id = "client-dup"
-    frame = json.dumps({
-        "action": "robot:move",
-        "params": {"x": 3},
-        "command_id": "cmd-dup"
-    }).encode() + b"\n"
-
-    receipt1 = await router.handle_frame_from_http(client_id, frame)
-    receipt2 = await router.handle_frame_from_http(client_id, frame)
-    assert receipt1["command_id"] == "cmd-dup"
-    assert receipt2["command_id"] == "cmd-dup"
-
-    item1 = await worker_q.get()
-    item2 = await worker_q.get()
-    data1 = json.loads(item1)
-    data2 = json.loads(item2)
-    assert data1["command_id"] == "cmd-dup"
-    assert data2["command_id"] == "cmd-dup"
+def test_router_excludes_source_transport():
+    router = Router()
+    t1 = DummyTransport()
+    t2 = DummyTransport()
+    router.register_transport(t1, ["player"], "both")
+    router.register_transport(t2, ["player"], "out")
+    frame = {"type": "player", "id": "p1"}
+    targets = router.route(frame, t1)
+    assert t1 not in targets
+    assert t2 in targets

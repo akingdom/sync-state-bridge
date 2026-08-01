@@ -1,8 +1,8 @@
 import pytest
 import asyncio
-from sync_state.sync_core import StateSync, canonical_hash
-from sync_state.qos import QoS, DropPolicy
-from sync_state.presets import Presets
+from sync_state.core.state_sync import StateSync, canonical_hash
+from sync_state.reliability.qos import QoS, DropPolicy
+from sync_state.reliability.presets import Presets
 
 
 def test_canonical_hash_deterministic():
@@ -36,7 +36,22 @@ async def test_version_gap_triggers_full_snapshot():
     sync.mark_dirty("sensors")
     await sync.commit()
 
-    # Request with client version past known range
     delta = sync.get_delta("sensors", client_version=99)
     assert delta["full"] is True
     assert len(delta["added"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_last_delta():
+    sync = StateSync()
+    data = [{"id": "e1", "val": 100}]
+    sync.register_snapshot_provider("sensors", lambda: data)
+    sync.mark_dirty("sensors")
+    await sync.commit()
+
+    delta = sync.get_last_delta("sensors")
+    assert delta is not None
+    assert delta["type"] == "sensors"
+    assert delta["version"] == 1
+    assert len(delta["added"]) == 1
+    assert delta["added"][0]["id"] == "e1"

@@ -1,5 +1,5 @@
 """
-sync_state/qos_queue.py
+sync_state/reliability/qos_queue.py
 
 Three‑tier priority queue with conflation for BEST_EFFORT and CRITICAL guarantees.
 Thread‑safe.
@@ -7,11 +7,13 @@ Thread‑safe.
 
 import queue
 import time
-from typing import Optional, Dict, Any
+import asyncio
 import threading
 import logging
+from typing import Optional, Dict, Any
 
-logger = logging.getLogger("sync_state.qos_queue")
+logger = logging.getLogger("sync_state.reliability.qos_queue")
+
 
 class PriorityQoSQueue:
     """
@@ -36,7 +38,7 @@ class PriorityQoSQueue:
             entity_id: Optional[str] = None) -> bool:
         """
         Insert a frame into the queue.
-    
+
         Returns:
             True if accepted, False if dropped.
         """
@@ -44,7 +46,7 @@ class PriorityQoSQueue:
         total_depth = (self._critical_q.qsize() +
                        len(self._conflatable) +
                        self._best_effort_q.qsize())
-    
+
         if qos_level == 1:  # BEST_EFFORT
             if total_depth > int(self.capacity * 0.8):
                 self._total_evicted += 1
@@ -55,31 +57,27 @@ class PriorityQoSQueue:
             except queue.Full:
                 self._total_evicted += 1
                 return False
-    
+
         elif qos_level == 2:  # CONFLATABLE
             key = entity_id or f"anon_{time.time_ns()}"
             with self._conflatable_lock:
                 self._conflatable[key] = frame_bytes
             return True
-    
+
         elif qos_level == 3:  # CRITICAL
             try:
                 self._critical_q.put_nowait(frame_bytes)
                 return True
             except queue.Full:
-                # Critical queue is full: drop the oldest critical frame to make room
-                # (ensures critical frames are never rejected)
                 try:
-                    self._critical_q.get_nowait()   # discard oldest critical
+                    self._critical_q.get_nowait()
                 except queue.Empty:
                     pass
-                # Now put the new critical
                 try:
                     self._critical_q.put_nowait(frame_bytes)
-                    self._total_evicted += 1   # we evicted an older critical
+                    self._total_evicted += 1
                     return True
                 except queue.Full:
-                    # Should not happen after we freed a slot
                     return False
         return False
 
@@ -104,14 +102,25 @@ class PriorityQoSQueue:
 
         return None
 
+    async def pop_async(self, stop_event: Optional[threading.Event] = None) -> Optional[bytes]:
+        """
+        Asynchronously pop a frame, yielding control while waiting.
+        Checks stop_event to allow clean exit.
+        """
+        while True:
+            if stop_event and stop_event.is_set():
+                return None
+            frame = self.pop()
+            if frame is not None:
+                return frame
+            await asyncio.sleep(0.001)
+
     def qsize(self) -> int:
-        """Approximate total queued items (conflatable dict items count)."""
         return (self._critical_q.qsize() +
                 len(self._conflatable) +
                 self._best_effort_q.qsize())
 
     def clear(self) -> None:
-        """Clear all queues."""
         while not self._critical_q.empty():
             try:
                 self._critical_q.get_nowait()
@@ -126,7 +135,6 @@ class PriorityQoSQueue:
                 break
 
     def stats(self) -> Dict[str, Any]:
-        """Return telemetry."""
         return {
             "critical_depth": self._critical_q.qsize(),
             "conflatable_depth": len(self._conflatable),

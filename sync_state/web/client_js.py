@@ -9,7 +9,7 @@ from importlib import resources
 # This prevents synchronous disk I/O blocking during live web requests.
 try:
     CLIENT_JS_CONTENT: str = (
-        resources.files("sync_state.client").joinpath("stateClient.js").read_text(encoding="utf-8")
+        resources.files("sync_state.web.static").joinpath("stateClient.js").read_text(encoding="utf-8")
     )
 except Exception as e:
     # Safe fallback wrapper to prevent system crashes if the PyPI package asset is corrupted

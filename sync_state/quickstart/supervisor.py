@@ -1,5 +1,5 @@
 """
-sync_state/supervisor.py
+sync_state/quickstart/supervisor.py
 
 Optional process supervisor to launch and monitor a Simulation Worker and HTTP Gateway.
 Restarts child processes if they crash.
@@ -14,7 +14,7 @@ import socket
 import os
 from typing import Optional
 
-logger = logging.getLogger("sync_state.supervisor")
+logger = logging.getLogger("sync_state.quickstart.supervisor")
 
 
 class Supervisor:

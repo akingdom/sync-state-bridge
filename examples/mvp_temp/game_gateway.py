@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from sync_state import DeltaRingBuffer
 from sync_state.js import get_client_js_content
 from sync_state.router import Router, RouterEntry
-from sync_state.qos import TypeMetadata, SyncDirection
+from sync_state.reliablity.qos import TypeMetadata, SyncDirection
 
 # Framing constants (same as worker)
 MAGIC = b"SSB1"
