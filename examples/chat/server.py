@@ -12,13 +12,12 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sync_state import StateSync
-from sync_state.js import get_client_js_content
+from sync_state.core.state_sync import StateSync
+from sync_state.web.client_js import get_client_js_content
 
 app = FastAPI()
 sync = StateSync(id_key="id", max_history=50)
 
-# Store messages as dicts with stable UUIDs
 messages = []
 
 def get_messages():
@@ -52,15 +51,11 @@ async def index():
 
 @app.get("/client/stateClient.js")
 def serve_client_js():
-    """
-    Serves the client asset instantly from system RAM.
-    """
     return HTMLResponse(
         content=get_client_js_content(),
         media_type="application/javascript"
     )
 
-# Mount static files (UI) and client library
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 if __name__ == "__main__":

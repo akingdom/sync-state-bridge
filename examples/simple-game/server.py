@@ -12,8 +12,8 @@ import random
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sync_state import StateSync
-from sync_state.js import get_client_js_content
+from sync_state.core.state_sync import StateSync
+from sync_state.web.client_js import get_client_js_content
 
 app = FastAPI()
 sync = StateSync(id_key="id", max_history=100)
@@ -28,7 +28,6 @@ state = {
 }
 
 def get_state():
-    # Return a list of entities for the "game" type
     return [{"id": "game", **state}]
 
 sync.register_snapshot_provider("game", get_state)
@@ -39,13 +38,8 @@ async def move(request: Request):
     index = data.get("index")
     if index is None:
         return {"error": "No index"}
-    # Process move (simplified: just toggle turn and make a guess)
-    # In real game, this would be more complex
-    if state["turn"] == "P1":
-        is_hit = state["p2Target"][index] == 1
-        state["p2Guessed"][index] = "hit" if is_hit else "miss"
-        state["turn"] = "P2"
-    else:
+    # Simplified logic: if index == -1, AI turn
+    if index == -1:
         # AI auto-turn
         unguessed = [i for i, g in enumerate(state["p1Guessed"]) if g is None]
         if unguessed:
@@ -53,6 +47,11 @@ async def move(request: Request):
             is_hit = state["p1Target"][pick] == 1
             state["p1Guessed"][pick] = "hit" if is_hit else "miss"
         state["turn"] = "P1"
+    else:
+        # Player turn
+        is_hit = state["p2Target"][index] == 1
+        state["p2Guessed"][index] = "hit" if is_hit else "miss"
+        state["turn"] = "P2"
     sync.mark_dirty("game")
     await sync.commit()
     return {"ok": True}
@@ -72,15 +71,11 @@ async def index():
 
 @app.get("/client/stateClient.js")
 def serve_client_js():
-    """
-    Serves the client asset instantly from system RAM.
-    """
     return HTMLResponse(
         content=get_client_js_content(),
         media_type="application/javascript"
     )
 
-# Mount static files (UI) and client library
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 if __name__ == "__main__":
