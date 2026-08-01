@@ -178,7 +178,7 @@ cd examples/simple-game && python server.py
 cd examples/advanced-game && python game_start.py
 ```
 
-These run on a local server, displayed in the web browser (at `http:0.0.0.0:8000` by default). Proof of this is that you can refresh or close+reopen the browser window and it is still running.
+These run on a local server, displayed in the web browser (at `http:loopback:8000` by default). Proof of this is that you can refresh or close+reopen the browser window and it is still running.
 
 ## Protocol
 
