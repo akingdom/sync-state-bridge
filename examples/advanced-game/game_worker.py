@@ -314,6 +314,18 @@ class GameState:
         self.bullets = []
         self.player_keys = {}
 
+    def trim_asteroids(self, new_max: int):
+        """Trim asteroids to at most new_max alive asteroids, dropping smallest first."""
+        alive = [a for a in self.asteroids if a.alive]
+        if len(alive) <= new_max:
+            return
+        # Sort alive by radius ascending (smallest first)
+        alive.sort(key=lambda a: a.radius)
+        # Keep the largest new_max asteroids
+        kept = alive[-new_max:]
+        # Remove all alive asteroids and add back only the kept ones
+        self.asteroids = [a for a in self.asteroids if not a.alive] + kept
+        
     def apply_governor_recommendations(self, rec: Dict[str, Any]):
         global current_max_particles, current_max_asteroids
         new_max_particles = rec.get("max_particles", current_max_particles)
@@ -329,7 +341,17 @@ class GameState:
                 self.next_particle_id = (self.next_particle_id + 1) % 1_000_000
 
         if len(self.asteroids) > new_max_asteroids:
-            self.asteroids = [a for a in self.asteroids if a.alive][:new_max_asteroids]
+            # Keep alive asteroids, sort by radius ascending (smallest first), then drop the smallest ones.
+            alive = [a for a in self.asteroids if a.alive]
+            if len(alive) > new_max_asteroids:
+                # Sort by radius (smallest first)
+                alive.sort(key=lambda a: a.radius)
+                # Keep the largest new_max_asteroids (drop the smallest ones)
+                self.asteroids = alive[-new_max_asteroids:] + [a for a in self.asteroids if not a.alive]
+            else:
+                # If not enough alive, just keep all alive and dead ones as is
+                # (dead asteroids will be removed in the next garbage collection)
+                pass
 
     def get_asteroids(self): return [a.to_dict() for a in self.asteroids if a.alive]
     def get_particles(self): return [p.to_dict() for p in self.particles]
@@ -463,6 +485,8 @@ async def connect_to_gateway(host='127.0.0.1', port=8766, max_attempts=20):
     raise RuntimeError("Could not connect to gateway")
 
 async def main():
+    global current_max_particles, current_max_asteroids
+
     reader, writer = await connect_to_gateway()
     state_sync = StateSync()
     game = GameState(state_sync)
@@ -487,7 +511,7 @@ async def main():
 
     asyncio.create_task(read_frames())
     asyncio.create_task(fetch_governor_stats(game))
-
+    
     try:
         while True:
             start = time.time()
@@ -508,6 +532,36 @@ async def main():
             game.update()
             await state_sync.commit()
 
+            # Measure loop duration
+            loop_duration = time.time() - start
+            
+            # Self‑adapt based on loop duration
+            if loop_duration > TICK * 1.2:
+                current_max_particles = max(50, current_max_particles - 10)
+                current_max_asteroids = max(4, current_max_asteroids - 1)
+                # Trim immediately
+                if len(game.particles) > current_max_particles:
+                    game.particles = game.particles[:current_max_particles]
+                if len(game.asteroids) > current_max_asteroids:
+                    game.asteroids = [a for a in game.asteroids if a.alive][:current_max_asteroids]
+            elif loop_duration < TICK * 0.6:
+                current_max_particles = min(300, current_max_particles + 2)
+                current_max_asteroids = min(20, current_max_asteroids + 1)
+            
+            # Send worker metrics every second (every 60 ticks)
+            if game.tick % 60 == 0:
+                metrics = {
+                    "type": "worker_metrics",
+                    "loop_duration_ms": loop_duration * 1000,
+                    "max_particles": current_max_particles,
+                    "max_asteroids": current_max_asteroids,
+                    "particle_count": len(game.particles),
+                    "asteroid_count": len([a for a in game.asteroids if a.alive]),
+                    "tick": game.tick,
+                }
+                await send_delta(writer, metrics)
+                
+                
             for type_name in ["asteroid", "player", "bullet", "particle"]:
                 delta = state_sync.get_last_delta(type_name)
                 if delta and (delta["added"] or delta["updated"] or delta["deleted"]):
