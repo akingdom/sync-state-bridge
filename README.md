@@ -59,7 +59,7 @@ async def stream(versions: str = "{}"):
 
 ### Advanced Full‑Stack Example (Gateway + Worker)
 
-For a production‑grade setup with separate gateway and worker processes, see the [advanced_game example](examples/advanced_game/). It demonstrates:
+For a production‑grade setup with separate gateway and worker processes, see the [advanced_game example](https://github.com/akingdom/sync-state-bridge/edit/main/examples/advanced-game/). It demonstrates:
 
 - **Router** – pure frame forwarder.
 - **SynchronisationKernel** – priority queue and backpressure.
