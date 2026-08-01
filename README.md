@@ -161,21 +161,28 @@ The test suite covers:
 
 ## Demos
 
-- [**Chat**](examples/chat/) – real‑time message broadcast with shared history.
-- [**Battleships**](examples/battleships/) – turn‑based game using StateSync.
-- [**Advanced Game**](examples/advanced_game/) – asteroids game with adaptive QoS and monitoring (the most comprehensive demo).
-
 Run the demos:
 
+- [**Chat**](https://github.com/akingdom/sync-state-bridge/edit/main/examples/chat/) – real‑time message broadcast with shared history.
 ```bash
 cd examples/chat && python server.py
-cd examples/battleships && python server.py
-cd examples/advanced_game && python game_start.py
 ```
+
+- [**Simple Game**](https://github.com/akingdom/sync-state-bridge/edit/main/examples/simple-game/) – turn‑based game using StateSync.
+```bash
+cd examples/simple-game && python server.py
+```
+
+- [**Advanced Game**](https://github.com/akingdom/sync-state-bridge/edit/main/examples/advanced-game/) – spaceship game with adaptive QoS and monitoring (the most comprehensive demo).
+```bash
+cd examples/advanced-game && python game_start.py
+```
+
+These run on a local server, displayed in the web browser (at `http:0.0.0.0:8000` by default). Proof of this is that you can refresh or close+reopen the browser window and it is still running.
 
 ## Protocol
 
-See [`PROTOCOL.md`](PROTOCOL.md) for the full SSE‑based delta protocol and the router/kernel design.
+See [`PROTOCOL.md`](https://github.com/akingdom/sync-state-bridge/edit/main/PROTOCOL.md) for the full SSE‑based delta protocol and the router/kernel design.
 
 ## License
 
