@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sync-state-bridge"
-version = "1.1.79"
+version = "1.1.80"
 description = "Versioned delta-state synchronization engine for real-time systems, IPC, and embedded applications"
 authors = [{name = "Andrew Kingdom", email = "1809762+akingdom@users.noreply.github.com"}]
 readme = "README.md"
