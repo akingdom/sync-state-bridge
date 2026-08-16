@@ -35,6 +35,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/akingdom/sync-state-bridge"
+Repository = "https://github.com/akingdom/sync-state-bridge"
 Bug-Tracker = "https://github.com/akingdom/sync-state-bridge/issues"
 
 [tool.setuptools]
