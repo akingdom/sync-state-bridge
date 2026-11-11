@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sync-state-bridge"
-version = "1.1.80"
+dynamic = ["version"]  # defined elsewhere
 description = "Versioned delta-state synchronization engine for real-time systems, IPC, and embedded applications"
 authors = [{name = "Andrew Kingdom", email = "1809762+akingdom@users.noreply.github.com"}]
 readme = "README.md"
@@ -46,8 +46,11 @@ sync_state = ["client/*.js"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["sync_state*"]
+include = ["sync_state*", "sync_state_bridge*"]
 exclude = ["tests", "docs", "examples"]
+
+[tool.setuptools.dynamic]
+version = {attr = "sync_state.__version__"}  # attribute in __init__
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

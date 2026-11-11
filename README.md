@@ -122,6 +122,59 @@ Each entity type can have a QoS profile:
 
 Pre‑configured profiles (`Presets.conservative()`, `Presets.low_bandwidth()`, `Presets.high_throughput()`) are provided.
 
+## Scope and Ordering
+
+`sync-state-bridge` provides **versioned convergence for abstract key-value state**.
+It versions deltas per entity type, applies QoS policies per type, and recovers
+from disconnection via version vectors and snapshot providers.
+
+### What SSB provides
+
+- Per-entity-type monotonic versioning
+- Segmented deltas (manifest + changed payload)
+- add / update / delete FSM with deterministic transitions
+- QoS delivery policies: CRITICAL, CONFLATABLE, BEST_EFFORT
+- Bounded backpressure with priority snapshot injection
+- Reconnection via version vector and snapshot recovery
+- Pluggable IPC / SSE / socket transports
+
+### What SSB does **not** provide
+
+SSB does **not** provide ordering for **sequence state** or **spatial state**.
+Specifically:
+
+- **Text sequences** (character-level editing) require an OT log or a sequence
+  CRDT (e.g. RGA). SSB can version a text field as an opaque property, but it
+  cannot merge concurrent character inserts without loss.
+- **Ordered lists** require fractional indexing or an equivalent order-maintenance
+  structure. SSB can version an `index` property on each item, but it does not
+  allocate, compare, or repair indices.
+- **Chat / event logs** require a temporal sequence log with causal ordering.
+  SSB versions individual messages as entities; it does not order the stream.
+- **Spatial coordinates** are versioned as ordinary properties; SSB applies no
+  spatial merge semantics.
+
+### What this means for callers
+
+If your domain has **only** abstract state (registers, maps, sets, counters,
+properties on identified entities), SSB is sufficient on its own.
+
+If your domain has **sequence or spatial state**, you must pair SSB with a
+**positional layer** chosen for your domain:
+
+| State kind | Companion mechanism |
+| :--- | :--- |
+| Character-level text, server-ordered | Operational Transformation (OT) |
+| Character-level text, offline-capable | Sequence CRDT (RGA) |
+| Ordered lists with stable IDs | Fractional indexing |
+| Append-only event streams | Temporal log + sequence cursor |
+| High-frequency spatial state | Snapshot interpolation (SSB is too coarse) |
+
+The **positional layer owns ordering**. SSB owns **convergence of the abstract
+state around it**. The two are complementary, not substitutes, and every
+production system examined (Google Docs, Figma, Notion, Linear, Liveblocks,
+Ably, Riot, multiplayer game servers) uses both in some form.
+
 ## Advanced Features
 
 ### QoS‑Aware Priority Queue

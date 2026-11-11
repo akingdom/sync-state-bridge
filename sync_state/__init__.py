@@ -23,6 +23,7 @@ from .reliability.ring_buffer import DeltaRingBuffer
 from .reliability.chunking import chunk_snapshot, SnapshotReassembler
 from .reliability.client_socket import StateSyncSocketClient
 
+__version__ = "1.1.82"
 __all__ = [
     # Core
     "Router",
